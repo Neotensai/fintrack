@@ -1,19 +1,23 @@
 'use strict';
-/* FinTrack — offline personal budget & affordability tracker
-   v2: variable monthly income, paid on the 27th of each month */
+/* FinTrack v3
+   - month net counts cash only; credit purchases shown separately
+   - forecast input no longer reversed (partial re-render)
+   - recovery model: editable assumptions, variable income aware, 50/30/20 check
+   - monthly savings targets with approach warnings */
 
 const TODAY = new Date();
 const YEAR = TODAY.getFullYear();
 const MS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const ML = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 const CATS = ['Housing','Food','Utilities','Transport','Health','Entertainment','Shopping','Electronics','Travel','Tech','Subscriptions','Other'];
-const CC = {Housing:'#6366f1',Food:'#10b981',Utilities:'#f59e0b',Transport:'#3b82f6',Health:'#ec4899',Entertainment:'#a855f7',Shopping:'#f97316',Electronics:'#06b6d4',Travel:'#84cc16',Tech:'#14b8a6',Subscriptions:'#e879f9',Other:'#64748b'};
+const CC = {Housing:'#6366f1',Food:'#34d399',Utilities:'#fbbf24',Transport:'#3b82f6',Health:'#ec4899',Entertainment:'#a855f7',Shopping:'#f97316',Electronics:'#06b6d4',Travel:'#84cc16',Tech:'#14b8a6',Subscriptions:'#e879f9',Other:'#64748b'};
 const KEY = 'fintrack-v1';
 
 function isoOf(d){ return d.toISOString().split('T')[0]; }
 
 const DEFAULTS = {
-  set: { startBal: 30000, startDate: isoOf(TODAY), income: 4500, incomeByMonth: {}, budgets: {} },
+  set: { startBal: 30000, startDate: isoOf(TODAY), income: 4500, incomeByMonth: {},
+         saveTarget: 500, saveByMonth: {}, fcIncome: '', fcExp: '', budgets: {} },
   txs: [],
   recurring: [],
   goals: [],
@@ -45,10 +49,14 @@ function save() {
   } catch(e){}
 }
 
-/* ---------- income (per month, paid on the 27th) ---------- */
+/* ---------- per-month settings (income & savings target) ---------- */
 function incomeFor(y, m) {
   const v = S.set.incomeByMonth[`${y}-${m}`];
   return (v === undefined || v === null || v === '') ? S.set.income : +v;
+}
+function saveFor(y, m) {
+  const v = S.set.saveByMonth[`${y}-${m}`];
+  return (v === undefined || v === null || v === '') ? S.set.saveTarget : +v;
 }
 function payday(y, m) { return new Date(y, m, 27, 12); }
 
@@ -81,11 +89,7 @@ function toast(msg){
   clearTimeout(t._h); t._h = setTimeout(()=>t.classList.remove('show'), 2200);
 }
 
-/* ---------- balance at any date ----------
-   startBal is the balance as of startDate.
-   Every 27th after startDate adds that month's income.
-   Cash expenses / extra income apply on their date.
-   Credit expenses apply on their clearance date. */
+/* ---------- balance at any date ---------- */
 function balAt(date) {
   let b = S.set.startBal;
   const sd0 = new Date(S.set.startDate + 'T00:00:00');
@@ -129,6 +133,7 @@ function compute() {
   }
   const pGroups = Object.values(gm).sort((a,b)=>a.date-b.date);
 
+  // avg monthly expenses from history (cash + credit by purchase month)
   const ebm = {};
   for (const t of txs) {
     if (t.type === 'expense') {
@@ -137,10 +142,20 @@ function compute() {
     }
   }
   const ev = Object.values(ebm);
-  const avgExp = ev.length ? ev.reduce((a,b)=>a+b,0)/ev.length : incomeFor(cy,cm) * 0.65;
-  const sb = avgExp * 3;
+  const avgExpHist = ev.length ? ev.reduce((a,b)=>a+b,0)/ev.length : incomeFor(cy,cm) * 0.65;
 
-  // next 27th: payday AND credit clearance day
+  // forecast model assumptions (user overrides win)
+  let inc12 = 0;
+  for (let m = 0; m < 12; m++) {
+    const fd = new Date(cy, cm + m, 1);
+    inc12 += incomeFor(fd.getFullYear(), fd.getMonth());
+  }
+  const avgInc12 = inc12 / 12;
+  const fcIncome = (S.set.fcIncome !== '' && S.set.fcIncome !== null && S.set.fcIncome !== undefined && +S.set.fcIncome > 0) ? +S.set.fcIncome : avgInc12;
+  const fcExp = (S.set.fcExp !== '' && S.set.fcExp !== null && S.set.fcExp !== undefined && +S.set.fcExp > 0) ? +S.set.fcExp : avgExpHist;
+  const sb = fcExp * 3;
+
+  // next 27th: payday + clearance
   const day = now.getDate();
   let n27, dd27;
   if (day < 27) { n27 = payday(cy, cm); dd27 = 27 - day; }
@@ -151,28 +166,38 @@ function compute() {
   else { const l27 = payday(cy, cm); prog = Math.min(100, ((now-l27)/(n27-l27))*100); }
   const a27 = gm[n27.toDateString()]?.total || 0;
   const pay27 = incomeFor(n27.getFullYear(), n27.getMonth());
-  const net27 = pay27 - a27;
 
+  // current month: cash and credit split
   const mTxs = txs.filter(t => { const d = new Date(t.date+'T12:00:00'); return d.getMonth()===cm && d.getFullYear()===cy; })
                   .sort((a,b)=> new Date(b.date) - new Date(a.date));
   const mIncome = incomeFor(cy, cm);
   const salaryReceived = day >= 27;
   const mInc = mIncome + mTxs.filter(t=>t.type==='income').reduce((s,t)=>s+t.amt,0);
-  const mExp = mTxs.filter(t=>t.type==='expense').reduce((s,t)=>s+t.amt,0);
+  const mCash = mTxs.filter(t=>t.type==='expense' && t.pm==='cash').reduce((s,t)=>s+t.amt,0);
+  const mCredit = mTxs.filter(t=>t.type==='expense' && t.pm==='credit').reduce((s,t)=>s+t.amt,0);
+  const mNet = mInc - mCash;            // credit excluded: it hits in 3 months
+  const mCommitted = mCash + mCredit;   // total spending committed this month
 
+  // pace: committed spend vs month elapsed
   const dim = new Date(cy, cm + 1, 0).getDate();
   const monthPct = (day / dim) * 100;
-  const spendBudget = mIncome;
-  const spendPct = spendBudget > 0 ? (mExp / spendBudget) * 100 : 0;
+  const spendPct = mInc > 0 ? (mCommitted / mInc) * 100 : 0;
   const pace = spendPct - monthPct;
+
+  // savings target for this month
+  const sTarget = saveFor(cy, cm);
+  const allowedSpend = Math.max(0, mInc - sTarget);
+  const projSave = mInc - mCommitted;
+  const savePct = allowedSpend > 0 ? (mCommitted / allowedSpend) * 100 : (mCommitted>0?999:0);
+  const saveStatus = savePct >= 100 ? 'missed' : savePct >= 80 ? 'close' : 'ok';
 
   const catSpend = {};
   for (const t of mTxs) if (t.type === 'expense') catSpend[t.cat] = (catSpend[t.cat]||0) + t.amt;
 
-  // year data — month-end balances via balAt
+  // year data
   const ydata = [];
   for (let m = 0; m < 12; m++) {
-    let ce = 0, cc = 0, ei = 0;
+    let ce = 0, cc = 0, cp = 0, ei = 0;
     const mt = [];
     for (const t of txs) {
       const d = new Date(t.date + 'T12:00:00');
@@ -180,6 +205,7 @@ function compute() {
         mt.push(t);
         if (t.type === 'income') ei += t.amt;
         else if (t.pm === 'cash') ce += t.amt;
+        else cp += t.amt;
       }
       if (t.type === 'expense' && t.pm === 'credit') {
         const cd = clrDate(t.date);
@@ -188,14 +214,18 @@ function compute() {
     }
     const ti = incomeFor(YEAR, m) + ei, net = ti - ce - cc;
     const endBal = balAt(new Date(YEAR, m + 1, 0, 23, 59));
-    ydata.push({ m, mt, ti, ce, cc, net, endBal, isCur: m === cm, isFut: m > cm });
+    const tgt = saveFor(YEAR, m);
+    const saved = ti - ce - cp;
+    ydata.push({ m, mt, ti, ce, cc, cp, net, endBal, tgt, saved, isCur: m === cm, isFut: m > cm });
   }
 
-  return { bal, pend, p90, ptot, pGroups, avgExp, sb, n27, dd27, prog, a27, pay27, net27,
-           mTxs, mInc, mExp, mIncome, salaryReceived, pace, monthPct, spendPct, catSpend, ydata };
+  return { bal, pend, p90, ptot, pGroups, avgExpHist, avgInc12, fcIncome, fcExp, sb,
+           n27, dd27, prog, a27, pay27, mTxs, mInc, mCash, mCredit, mNet, mCommitted,
+           mIncome, salaryReceived, pace, monthPct, spendPct,
+           sTarget, allowedSpend, projSave, savePct, saveStatus, catSpend, ydata };
 }
 
-/* ---------- SVG mini charts ---------- */
+/* ---------- SVG charts ---------- */
 function svgYearChart(C) {
   const W = 340, H = 150, padL = 6, padB = 16;
   const maxV = Math.max(1, ...C.ydata.map(d => Math.max(d.ti, d.ce + d.cc)));
@@ -207,14 +237,14 @@ function svgYearChart(C) {
     const x = padL + i * bw;
     const hI = Math.max(2, (d.ti / maxV) * (H - padB - 8));
     const hE = Math.max(2, ((d.ce + d.cc) / maxV) * (H - padB - 8));
-    bars += `<rect x="${(x+2).toFixed(1)}" y="${(H-padB-hI).toFixed(1)}" width="${(bw/2-3).toFixed(1)}" height="${hI.toFixed(1)}" rx="2" fill="rgba(16,185,129,.75)"/>`;
-    bars += `<rect x="${(x+bw/2+1).toFixed(1)}" y="${(H-padB-hE).toFixed(1)}" width="${(bw/2-3).toFixed(1)}" height="${hE.toFixed(1)}" rx="2" fill="rgba(244,63,94,.7)"/>`;
-    bars += `<text x="${(x+bw/2).toFixed(1)}" y="${H-3}" font-size="8" fill="#64748b" text-anchor="middle" font-weight="700">${MS[i]}</text>`;
+    bars += `<rect x="${(x+2).toFixed(1)}" y="${(H-padB-hI).toFixed(1)}" width="${(bw/2-3).toFixed(1)}" height="${hI.toFixed(1)}" rx="2" fill="rgba(52,211,153,.8)"/>`;
+    bars += `<rect x="${(x+bw/2+1).toFixed(1)}" y="${(H-padB-hE).toFixed(1)}" width="${(bw/2-3).toFixed(1)}" height="${hE.toFixed(1)}" rx="2" fill="rgba(251,113,133,.75)"/>`;
+    bars += `<text x="${(x+bw/2).toFixed(1)}" y="${H-3}" font-size="8" fill="#5d6b84" text-anchor="middle" font-weight="700">${MS[i]}</text>`;
     const ly = 8 + (1 - (d.endBal - minB) / (maxB - minB || 1)) * (H - padB - 16);
     line += (i ? 'L' : 'M') + (x + bw/2).toFixed(1) + ',' + ly.toFixed(1) + ' ';
   });
   return `<svg class="svgline" viewBox="0 0 ${W} ${H}" role="img" aria-label="Monthly income and expenses for ${YEAR} with balance trend line">
-    ${bars}<path d="${line}" stroke="#6366f1" stroke-width="2" fill="none" stroke-linecap="round"/></svg>`;
+    ${bars}<path d="${line}" stroke="#8b5cf6" stroke-width="2" fill="none" stroke-linecap="round"/></svg>`;
 }
 
 function svgProjection(C, forecast) {
@@ -235,8 +265,8 @@ function svgProjection(C, forecast) {
     const fd = new Date(TODAY.getFullYear(), TODAY.getMonth() + m, 1);
     const hit = pendByMonth[`${fd.getFullYear()}-${fd.getMonth()}`] || 0;
     const inc = incomeFor(fd.getFullYear(), fd.getMonth());
-    base.push(base[base.length-1] + inc - C.avgExp - hit);
-    post.push(post[post.length-1] + inc - C.avgExp - hit);
+    base.push(base[base.length-1] + inc - C.fcExp - hit);
+    post.push(post[post.length-1] + inc - C.fcExp - hit);
     labels.push(MS[fd.getMonth()]);
   }
   const all = [...base, ...post, C.sb, 0];
@@ -244,14 +274,14 @@ function svgProjection(C, forecast) {
   const X = i => 8 + (i / 11) * (W - 16);
   const Y = v => 8 + (1 - (v - mn) / (mx - mn || 1)) * (H - padB - 14);
   const path = arr => arr.map((v,i)=>(i?'L':'M')+X(i).toFixed(1)+','+Y(v).toFixed(1)).join(' ');
-  const sc = forecast.status==='red'?'#f43f5e':forecast.status==='yellow'?'#f59e0b':'#10b981';
+  const sc = forecast.status==='red'?'#fb7185':forecast.status==='yellow'?'#fbbf24':'#34d399';
   let lbls = '';
-  [0,3,6,9,11].forEach(i => { lbls += `<text x="${X(i).toFixed(1)}" y="${H-3}" font-size="8" fill="#64748b" text-anchor="middle" font-weight="700">${labels[i]}</text>`; });
+  [0,3,6,9,11].forEach(i => { lbls += `<text x="${X(i).toFixed(1)}" y="${H-3}" font-size="8" fill="#5d6b84" text-anchor="middle" font-weight="700">${labels[i]}</text>`; });
   return `<svg class="svgline" viewBox="0 0 ${W} ${H}" role="img" aria-label="Projected balance over 12 months with and without the purchase">
-    <line x1="8" y1="${Y(C.sb).toFixed(1)}" x2="${W-8}" y2="${Y(C.sb).toFixed(1)}" stroke="#475569" stroke-width="1" stroke-dasharray="3,3"/>
-    <text x="${W-10}" y="${(Y(C.sb)-4).toFixed(1)}" font-size="8" fill="#64748b" text-anchor="end" font-weight="700">buffer ${$0(C.sb)}</text>
-    <line x1="8" y1="${Y(0).toFixed(1)}" x2="${W-8}" y2="${Y(0).toFixed(1)}" stroke="#33415566" stroke-width="1"/>
-    <path d="${path(base)}" stroke="#6366f1" stroke-width="2" fill="none" stroke-linecap="round"/>
+    <line x1="8" y1="${Y(C.sb).toFixed(1)}" x2="${W-8}" y2="${Y(C.sb).toFixed(1)}" stroke="#5d6b84" stroke-width="1" stroke-dasharray="3,3"/>
+    <text x="${W-10}" y="${(Y(C.sb)-4).toFixed(1)}" font-size="8" fill="#5d6b84" text-anchor="end" font-weight="700">buffer ${$0(C.sb)}</text>
+    <line x1="8" y1="${Y(0).toFixed(1)}" x2="${W-8}" y2="${Y(0).toFixed(1)}" stroke="rgba(148,163,184,.25)" stroke-width="1"/>
+    <path d="${path(base)}" stroke="#8b5cf6" stroke-width="2" fill="none" stroke-linecap="round"/>
     <path d="${path(post)}" stroke="${sc}" stroke-width="2" fill="none" stroke-dasharray="5,3" stroke-linecap="round"/>
     ${lbls}</svg>`;
 }
@@ -283,7 +313,7 @@ function txItem(t) {
   return `<div class="txi">
     <div class="row">
       <div class="row" style="gap:0;min-width:0">
-        <div class="txd" style="background:${CC[t.cat]||'#64748b'}"></div>
+        <div class="txd" style="background:${CC[t.cat]||'#64748b'};color:${CC[t.cat]||'#64748b'}"></div>
         <div style="min-width:0">
           <div class="txn">${esc(t.desc)}</div>
           <div class="txs">${sd(t.date)} &middot; ${t.cat}
@@ -306,30 +336,45 @@ function vHome(C) {
   const paceMsg = C.pace > 10 ? 'Spending much faster than the month is passing'
     : C.pace > 0 ? 'Slightly ahead of pace — ease off a little'
     : 'On pace — spending is under control';
+  const sCol = C.saveStatus==='missed' ? 'var(--red)' : C.saveStatus==='close' ? 'var(--amb)' : 'var(--grn)';
+  const sMsg = C.saveStatus==='missed'
+      ? `Target missed — spending exceeded your limit by ${$0(C.mCommitted - C.allowedSpend)}. Projected savings: ${$0(C.projSave)}.`
+    : C.saveStatus==='close'
+      ? `Careful — only ${$0(C.allowedSpend - C.mCommitted)} of spending left before you eat into your ${$0(C.sTarget)} target.`
+      : `On track — you can still spend ${$0(C.allowedSpend - C.mCommitted)} and hit your ${$0(C.sTarget)} target.`;
   return `
   <div class="pg">
-    <div class="kpi">
+    <div class="kpi hero">
       <div class="row"><div class="kl">Overall balance</div><div class="kl">${$0(C.ptot)} deferred</div></div>
-      <div class="kv" style="color:${C.bal>=0?'var(--grn)':'var(--red)'}">${$$(C.bal)}</div>
+      <div class="kv">${$$(C.bal)}</div>
       <div class="pt"><div class="pb" style="width:${Math.min(100,Math.max(3,C.bal/(C.bal+C.ptot+1)*100)).toFixed(1)}%"></div></div>
+      <div class="ks">Payday in ${C.dd27===0?'— today':C.dd27+' days'}: <b>+${$0(C.pay27)}</b>${C.a27>0?` &middot; credit clearing: <b>−${$0(C.a27)}</b>`:''}</div>
     </div>
     <div class="k2">
-      <div class="kpi sm" style="margin:0">
+      <div class="kpi sm">
         <div class="kl">${ML[TODAY.getMonth()]} net</div>
-        <div class="kv" style="color:${(C.mInc-C.mExp)>=0?'var(--grn)':'var(--red)'}">${$0(C.mInc-C.mExp)}</div>
-        <div class="ks">+${$0(C.mInc)} / -${$0(C.mExp)}</div>
-        ${!C.salaryReceived ? `<div class="ks" style="color:var(--amb)">salary not received yet</div>` : `<div class="ks" style="color:var(--grn)">salary received</div>`}
+        <div class="kv" style="color:${C.mNet>=0?'var(--grn)':'var(--red)'}">${$0(C.mNet)}</div>
+        <div class="ks">+${$0(C.mInc)} &middot; cash −${$0(C.mCash)}</div>
+        <div class="ks" style="color:${C.salaryReceived?'var(--grn)':'var(--amb)'}">${C.salaryReceived?'salary received':'salary on the 27th'}</div>
       </div>
-      <div class="kpi sm" style="margin:0">
-        <div class="kl">Payday &amp; clearance</div>
-        <div class="kv">${C.dd27===0?'Today':C.dd27+'d'}</div>
-        <div class="ks"><span style="color:var(--grn);font-weight:700">+${$0(C.pay27)}</span>${C.a27>0?` <span style="color:var(--amb);font-weight:700">−${$0(C.a27)}</span>`:''} on ${C.n27.toLocaleDateString('en-US',{month:'short',day:'numeric'})}</div>
-        <div class="pt"><div class="pb" style="width:${C.prog.toFixed(1)}%"></div></div>
+      <div class="kpi sm">
+        <div class="kl">Credit spent</div>
+        <div class="kv" style="color:${C.mCredit>0?'var(--amb)':'var(--tx3)'}">${$0(C.mCredit)}</div>
+        <div class="ks">this month, on card</div>
+        <div class="ks" style="color:var(--tx3)">deducts in 3 months on the 27th</div>
       </div>
     </div>
-    <div class="kpi sm">
+    <div class="kpi sm" style="margin-bottom:11px">
+      <div class="row"><div class="kl">Savings target &middot; ${ML[TODAY.getMonth()].slice(0,3)}</div>
+        <div style="font-size:11px;font-weight:800;color:${sCol}">${$0(C.projSave)} / ${$0(C.sTarget)} projected</div></div>
+      <div class="gauge" style="margin-top:9px;height:9px">
+        <div class="gfill" style="width:${Math.min(100,C.savePct).toFixed(1)}%;background:${sCol}"></div>
+      </div>
+      <div class="ks" style="margin-top:7px;color:${sCol}">${sMsg}</div>
+    </div>
+    <div class="kpi sm" style="margin-bottom:11px">
       <div class="row"><div class="kl">Spending pace</div>
-        <div style="font-size:11px;font-weight:800;color:${paceColor}">${Math.round(C.spendPct)}% spent &middot; ${Math.round(C.monthPct)}% of month</div></div>
+        <div style="font-size:11px;font-weight:800;color:${paceColor}">${Math.round(C.spendPct)}% committed &middot; ${Math.round(C.monthPct)}% of month</div></div>
       <div class="gauge" style="margin-top:9px;height:9px">
         <div class="gfill" style="width:${Math.min(100,C.spendPct).toFixed(1)}%;background:${paceColor}"></div>
         <div style="position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--tx2);left:${Math.min(100,C.monthPct).toFixed(1)}%"></div>
@@ -368,13 +413,16 @@ function vYear(C) {
       <div class="ct" style="margin-bottom:10px">${YEAR} overview</div>
       ${svgYearChart(C)}
       <div class="lgnd">
-        <span class="lgi"><span class="lgbox" style="background:rgba(16,185,129,.75)"></span>Income</span>
-        <span class="lgi"><span class="lgbox" style="background:rgba(244,63,94,.7)"></span>Expenses</span>
-        <span class="lgi"><span class="lgline" style="background:#6366f1"></span>Balance</span>
+        <span class="lgi"><span class="lgbox" style="background:rgba(52,211,153,.8)"></span>Income</span>
+        <span class="lgi"><span class="lgbox" style="background:rgba(251,113,133,.75)"></span>Expenses</span>
+        <span class="lgi"><span class="lgline" style="background:#8b5cf6"></span>Balance</span>
       </div>
     </div>
-    ${C.ydata.map(md => `
-    <div class="mc ${md.isCur?'cur':''}" ${md.isFut?'style="opacity:.7"':''} onclick="toggleM(${md.m})">
+    ${C.ydata.map(md => {
+      const sPct = md.tgt > 0 ? Math.max(0, Math.min(100, (md.saved/md.tgt)*100)) : 0;
+      const sCol = md.saved >= md.tgt ? 'var(--grn)' : md.saved >= md.tgt*0.5 ? 'var(--amb)' : 'var(--red)';
+      return `
+    <div class="mc ${md.isCur?'cur':''}" ${md.isFut?'style="opacity:.72"':''} onclick="toggleM(${md.m})">
       <div class="row">
         <div class="mn">${ML[md.m]}
           ${md.isCur?`<span class="mtag" style="background:var(--ind);color:#fff">NOW</span>`:''}
@@ -382,9 +430,13 @@ function vYear(C) {
         <div style="font-size:15px;font-weight:800;color:${md.net>=0?'var(--grn)':'var(--red)'}">${md.net>=0?'+':''}${$0(md.net)}</div>
       </div>
       <div class="row" style="margin-top:7px;font-size:11px;color:var(--tx3)">
-        <span>In <b style="color:var(--grn)">${$0(md.ti)}</b> &middot; Cash <b style="color:${md.ce>0?'var(--red)':'var(--tx3)'}">${$0(md.ce)}</b>${md.cc>0?` &middot; Credit clr <b style="color:var(--amb)">${$0(md.cc)}</b>`:''}</span>
+        <span>In <b style="color:var(--grn)">${$0(md.ti)}</b> &middot; Cash <b style="color:${md.ce>0?'var(--red)':'var(--tx3)'}">${$0(md.ce)}</b>${md.cp>0?` &middot; Card <b style="color:var(--amb)">${$0(md.cp)}</b>`:''}${md.cc>0?` &middot; Clears <b style="color:var(--amb)">${$0(md.cc)}</b>`:''}</span>
         <span>End: <b style="color:${md.endBal>=0?'var(--tx)':'var(--red)'}">${$0(md.endBal)}</b></span>
       </div>
+      ${md.tgt>0 && !md.isFut ? `<div style="margin-top:8px">
+        <div class="row" style="font-size:10px;color:var(--tx3);margin-bottom:4px"><span>Saved ${$0(Math.max(0,md.saved))} of ${$0(md.tgt)} target</span><span style="color:${sCol};font-weight:700">${md.saved>=md.tgt?'reached':Math.round(sPct)+'%'}</span></div>
+        <div class="gauge" style="height:5px"><div class="gfill" style="width:${sPct.toFixed(1)}%;background:${sCol};height:5px"></div></div>
+      </div>`:''}
       ${S.expMonth===md.m ? `<div style="margin-top:9px;padding-top:9px;border-top:1px solid var(--bd)">
         ${md.mt.length===0 ? `<div style="font-size:11px;color:var(--tx3);text-align:center;padding:4px 0">No transactions</div>`
         : md.mt.map(t=>`<div class="row" style="font-size:12px;padding:3px 0">
@@ -392,7 +444,7 @@ function vYear(C) {
             <span style="font-weight:700;color:${t.type==='income'?'var(--grn)':'var(--red)'}">${t.type==='income'?'+':'-'}${$0(t.amt)}</span>
           </div>`).join('')}
       </div>` : ''}
-    </div>`).join('')}
+    </div>`;}).join('')}
   </div>`;
 }
 
@@ -420,79 +472,102 @@ function vAdd() {
         <div class="seg">
           <button class="segb ${f.pm==='cash'?'a':''}" onclick="S.form.pm='cash';render()">Cash &middot; instant</button>
           <button class="segb ${f.pm==='credit'?'a':''}" onclick="S.form.pm='credit';render()">Credit &middot; 3-mo lag</button>
-        </div></div>` : `<div class="cn" style="background:rgba(16,185,129,.07);border-color:rgba(16,185,129,.3)">Use this for extra income only (freelance, gifts, refunds). Your salary is added automatically on the 27th — set the amounts in Settings &rarr; Income by month.</div>`}
+        </div></div>` : `<div class="cn" style="background:rgba(52,211,153,.06);border-color:rgba(52,211,153,.3)">Use this for extra income only (freelance, gifts, refunds). Your salary is added automatically on the 27th — set the amounts in Settings &rarr; Income by month.</div>`}
       <div class="fg"><label class="flab">Category</label>
         <select class="finp" id="f-cat" onchange="S.form.cat=this.value">
           ${CATS.map(c=>`<option ${f.cat===c?'selected':''}>${c}</option>`).join('')}</select></div>
       <label class="chk fg"><input type="checkbox" ${f.recurring?'checked':''} onchange="S.form.recurring=this.checked">
         <span>Repeats monthly (subscription / bill)</span></label>
-      ${showCredit ? `<div class="cn">Credit lag active: this charge deducts from your balance on <b style="color:var(--amb)">${ld(clrDate(f.date))}</b> — 3 months after purchase.</div>` : ''}
+      ${showCredit ? `<div class="cn">Credit lag active: this charge deducts from your balance on <b style="color:var(--amb)">${ld(clrDate(f.date))}</b> — 3 months after purchase. Until then it shows under "Credit spent", not in your monthly net.</div>` : ''}
       <button class="bp" onclick="addTx()">Add transaction</button>
     </div>
   </div>`;
 }
 
-function vForecast(C) {
+/* ---------- forecast (input fixed: results render separately) ---------- */
+function fcResults(C) {
   const fc = parseFloat(S.forecastAmt);
-  let f = null;
-  if (fc > 0) {
-    const ab = C.bal - fc, ac = ab - C.p90, gap = ac - C.sb;
-    f = { cost: fc, ab, ac, gap, status: ac < 0 ? 'red' : gap < 0 ? 'yellow' : 'green' };
-  }
+  if (!(fc > 0)) return `<div class="emp">Enter an amount above to get a verdict.</div>`;
+  const ab = C.bal - fc, ac = ab - C.p90, gap = ac - C.sb;
+  const f = { cost: fc, ab, ac, gap, status: ac < 0 ? 'red' : gap < 0 ? 'yellow' : 'green' };
   const VS = {
-    green:{c:'var(--grn)',bg:'rgba(16,185,129,.08)',bd:'rgba(16,185,129,.35)',label:'SAFE TO PURCHASE'},
-    yellow:{c:'var(--amb)',bg:'rgba(245,158,11,.08)',bd:'rgba(245,158,11,.35)',label:'PROCEED WITH CAUTION'},
-    red:{c:'var(--red)',bg:'rgba(244,63,94,.08)',bd:'rgba(244,63,94,.35)',label:'NOT RECOMMENDED'},
+    green:{c:'var(--grn)',bg:'rgba(52,211,153,.07)',bd:'rgba(52,211,153,.35)',label:'SAFE TO PURCHASE'},
+    yellow:{c:'var(--amb)',bg:'rgba(251,191,36,.07)',bd:'rgba(251,191,36,.35)',label:'PROCEED WITH CAUTION'},
+    red:{c:'var(--red)',bg:'rgba(251,113,133,.07)',bd:'rgba(251,113,133,.35)',label:'NOT RECOMMENDED'},
   };
-  // average income over the next 12 months (respects per-month overrides)
-  let inc12 = 0;
-  for (let m = 0; m < 12; m++) {
-    const fd = new Date(TODAY.getFullYear(), TODAY.getMonth() + m, 1);
-    inc12 += incomeFor(fd.getFullYear(), fd.getMonth());
-  }
-  const avgInc = inc12 / 12;
-  const surplus = avgInc - C.avgExp;
-  const recovMo = f && surplus > 0 ? Math.ceil(f.cost / surplus) : null;
+  const surplus = C.fcIncome - C.fcExp;
+  const recovMo = surplus > 0 ? Math.ceil(f.cost / surplus) : null;
   const recovDate = recovMo ? new Date(TODAY.getFullYear(), TODAY.getMonth()+recovMo, 1) : null;
+  const disc = C.fcIncome * 0.30; // 50/30/20 discretionary share
+  const discMonths = disc > 0 ? f.cost / disc : 0;
+  return `
+  <div class="verd" style="background:${VS[f.status].bg};border:2px solid ${VS[f.status].bd}">
+    <div class="vt" style="color:${VS[f.status].c}">${VS[f.status].label}</div>
+    <div class="vd">${
+      f.status==='green' ? `After buying (${$$(f.cost)}) and settling all pending credit in the next 90 days, you keep ${$$(f.ac)} — ${$$(f.gap)} above your ${$0(C.sb)} safety buffer.`
+      : f.status==='yellow' ? `Technically affordable, but it breaches the safety cushion: balance falls to ${$$(f.ac)}, ${$$( Math.abs(f.gap))} short of the required ${$0(C.sb)} buffer.`
+      : `This would drive your balance to ${$$(f.ac)} after pending credit settles. Avoid or delay this purchase.`
+    }</div>
+  </div>
+  <div class="fmlt">Cash flow recovery model</div>
+  <div class="cg3" style="margin-bottom:13px">
+    <div class="ccrd"><div class="ccl">Surplus / mo</div><div class="ccv" style="color:${surplus>=0?'var(--grn)':'var(--red)'}">${$0(surplus)}</div></div>
+    <div class="ccrd"><div class="ccl">Recovery</div><div class="ccv" style="color:${recovMo?VS[f.status].c:'var(--red)'}">${recovMo?recovMo+' mo':'never'}</div></div>
+    <div class="ccrd"><div class="ccl">Recovered by</div><div class="ccv" style="font-size:11.5px;color:var(--tx2)">${recovDate?recovDate.toLocaleDateString('en-US',{month:'short',year:'numeric'}):'—'}</div></div>
+  </div>
+  <div class="cn" style="background:rgba(139,92,246,.06);border-color:rgba(139,92,246,.3)">
+    <b>50/30/20 check:</b> with ${$0(C.fcIncome)} income, your guideline discretionary (wants) budget is ${$0(disc)}/mo.
+    This purchase equals <b>${discMonths.toFixed(1)} month${discMonths>=1.95?'s':''}</b> of that allowance${discMonths>3?' — consider spreading or delaying it':''}.
+  </div>
+  <div class="fmlt">12-month projection</div>
+  ${svgProjection(C, f)}
+  <div class="lgnd" style="margin-bottom:13px">
+    <span class="lgi"><span class="lgline" style="background:#8b5cf6"></span>Without purchase</span>
+    <span class="lgi"><span class="lgline" style="background:${f.status==='red'?'#fb7185':f.status==='yellow'?'#fbbf24':'#34d399'}"></span>After purchase</span>
+  </div>
+  <div class="fmla">
+    <div class="fmlt">Formula breakdown</div>
+    ${$0(C.bal)} − ${$0(f.cost)} − ${$0(C.p90)} = <b style="color:${f.ac<0?'var(--red)':f.ac<C.sb?'var(--amb)':'var(--grn)'}">${$0(f.ac)}</b><br>
+    SB = exp × 3 = ${$0(C.fcExp)} × 3 = <b>${$0(C.sb)}</b><br>
+    Recovery = cost ÷ surplus = ${$0(f.cost)} ÷ ${$0(surplus)}${recovMo?` ≈ <b>${recovMo} mo</b>`:''}
+  </div>`;
+}
+
+function fcInput(v) {
+  S.forecastAmt = v;
+  const box = document.getElementById('fcres');
+  if (box) box.innerHTML = fcResults(compute());
+}
+
+function vForecast(C) {
   return `
   <div class="pg">
     <div class="card">
       <div class="ct" style="font-size:15px">Can I afford this?</div>
-      <div class="cs" style="margin-bottom:13px">Checks the purchase against your balance, pending credit, 3-month safety buffer, and cash flow recovery rate.</div>
+      <div class="cs" style="margin-bottom:13px">Checks the purchase against your balance, pending credit, 3-month safety buffer, the 50/30/20 guideline, and your cash flow recovery rate.</div>
       <div class="fbig"><label class="flab" style="text-align:center">Purchase amount ($)</label>
-        <input class="fbiginp" id="fc-inp" type="number" inputmode="decimal" min="0" placeholder="0" value="${S.forecastAmt}" oninput="S.forecastAmt=this.value;render();document.getElementById('fc-inp').focus()"></div>
+        <input class="fbiginp" type="number" inputmode="decimal" min="0" placeholder="0" value="${S.forecastAmt}" oninput="fcInput(this.value)"></div>
       <div class="cg3">
-        <div class="ccrd"><div class="ccl">Balance</div><div class="ccv" style="color:var(--ind)">${$0(C.bal)}</div></div>
+        <div class="ccrd"><div class="ccl">Balance</div><div class="ccv" style="color:#a5b4fc">${$0(C.bal)}</div></div>
         <div class="ccrd"><div class="ccl">Pending 90d</div><div class="ccv" style="color:var(--amb)">${$0(C.p90)}</div></div>
         <div class="ccrd"><div class="ccl">Buffer SB</div><div class="ccv" style="color:var(--tx3)">${$0(C.sb)}</div></div>
       </div>
-      ${f ? `
-      <div class="verd" style="background:${VS[f.status].bg};border:2px solid ${VS[f.status].bd}">
-        <div class="vt" style="color:${VS[f.status].c}">${VS[f.status].label}</div>
-        <div class="vd">${
-          f.status==='green' ? `After buying (${$$(f.cost)}) and settling all pending credit in the next 90 days, you keep ${$$(f.ac)} — ${$$(f.gap)} above your ${$0(C.sb)} safety buffer.`
-          : f.status==='yellow' ? `Technically affordable, but it breaches the safety cushion: balance falls to ${$$(f.ac)}, ${$$( Math.abs(f.gap))} short of the required ${$0(C.sb)} buffer.`
-          : `This would drive your balance to ${$$(f.ac)} after pending credit settles. Avoid or delay this purchase.`
-        }</div>
+      <div class="fmlt" style="margin-top:2px">Model inputs — edit to match your situation</div>
+      <div class="fg2" style="margin-bottom:13px">
+        <div>
+          <label class="flab">Avg monthly income</label>
+          <input class="finp" type="number" inputmode="decimal" placeholder="${Math.round(C.avgInc12)}" value="${S.set.fcIncome}"
+            onchange="S.set.fcIncome=this.value;save();render()">
+          <div class="ks" style="margin-top:4px">blank = auto from your next 12 months (${$0(C.avgInc12)})</div>
+        </div>
+        <div>
+          <label class="flab">Avg monthly expenses</label>
+          <input class="finp" type="number" inputmode="decimal" placeholder="${Math.round(C.avgExpHist)}" value="${S.set.fcExp}"
+            onchange="S.set.fcExp=this.value;save();render()">
+          <div class="ks" style="margin-top:4px">blank = auto from your history (${$0(C.avgExpHist)})</div>
+        </div>
       </div>
-      <div class="fmlt">Cash flow recovery model</div>
-      <div class="cg3" style="margin-bottom:13px">
-        <div class="ccrd"><div class="ccl">Avg surplus/mo</div><div class="ccv" style="color:${surplus>=0?'var(--grn)':'var(--red)'}">${$0(surplus)}</div></div>
-        <div class="ccrd"><div class="ccl">Recovery</div><div class="ccv" style="color:${recovMo?VS[f.status].c:'var(--red)'}">${recovMo?recovMo+' mo':'never'}</div></div>
-        <div class="ccrd"><div class="ccl">Recovered by</div><div class="ccv" style="font-size:11.5px;color:var(--tx2)">${recovDate?recovDate.toLocaleDateString('en-US',{month:'short',year:'numeric'}):'—'}</div></div>
-      </div>
-      <div class="fmlt">12-month projection</div>
-      ${svgProjection(C, f)}
-      <div class="lgnd" style="margin-bottom:13px">
-        <span class="lgi"><span class="lgline" style="background:#6366f1"></span>Without purchase</span>
-        <span class="lgi"><span class="lgline" style="background:${f.status==='red'?'#f43f5e':f.status==='yellow'?'#f59e0b':'#10b981'}"></span>After purchase</span>
-      </div>
-      <div class="fmla">
-        <div class="fmlt">Formula breakdown</div>
-        ${$0(C.bal)} − ${$0(f.cost)} − ${$0(C.p90)} = <b style="color:${f.ac<0?'var(--red)':f.ac<C.sb?'var(--amb)':'var(--grn)'}">${$0(f.ac)}</b><br>
-        SB = μ_exp × 3 = ${$0(C.avgExp)} × 3 = <b>${$0(C.sb)}</b><br>
-        Recovery = cost ÷ surplus = ${$0(f.cost)} ÷ ${$0(surplus)}${recovMo?` ≈ <b>${recovMo} mo</b>`:''}
-      </div>` : `<div class="emp">Enter an amount above to get a verdict.</div>`}
+      <div id="fcres">${fcResults(C)}</div>
     </div>
   </div>`;
 }
@@ -501,7 +576,8 @@ function vSettings(C) {
   if (S.subview === 'budgets') return vBudgets(C);
   if (S.subview === 'goals') return vGoals(C);
   if (S.subview === 'recurring') return vRecurring();
-  if (S.subview === 'income') return vIncome();
+  if (S.subview === 'income') return vMonthEditor('Income by month', 'incomeByMonth', S.set.income, 'Paid on the 27th. Empty months use the default');
+  if (S.subview === 'savings') return vMonthEditor('Savings target by month', 'saveByMonth', S.set.saveTarget, 'How much you want left over each month. Empty months use the default');
   return `
   <div class="pg">
     <div class="card">
@@ -512,6 +588,13 @@ function vSettings(C) {
       </div>
       <div class="set-row" onclick="S.subview='income';render()" style="cursor:pointer">
         <div><div class="set-l">Income by month</div><div class="set-s">Set the actual amount for each month</div></div>
+        <span style="color:var(--tx3)">&rsaquo;</span></div>
+      <div class="set-row">
+        <div><div class="set-l">Default savings target</div><div class="set-s">How much you aim to keep each month</div></div>
+        <input class="set-inp" type="number" inputmode="decimal" value="${S.set.saveTarget}" onchange="S.set.saveTarget=+this.value||0;save();render()">
+      </div>
+      <div class="set-row" onclick="S.subview='savings';render()" style="cursor:pointer">
+        <div><div class="set-l">Savings target by month</div><div class="set-s">Set a different target per month</div></div>
         <span style="color:var(--tx3)">&rsaquo;</span></div>
       <div class="set-row">
         <div><div class="set-l">Balance</div><div class="set-s">Your liquidity on the date below</div></div>
@@ -554,23 +637,22 @@ function vSettings(C) {
   </div>`;
 }
 
-function vIncome() {
+function vMonthEditor(title, mapKey, defaultVal, subtitle) {
   const cy = YEAR;
   return `
   <div class="pg">
     <button class="bk" onclick="S.subview=null;render()">&lsaquo; Settings</button>
     <div class="card">
-      <div class="ct" style="margin-bottom:4px">Income by month — ${cy}</div>
-      <div class="cs" style="margin-bottom:14px">Each salary lands on the 27th. Empty months use the default (${$0(S.set.income)}).</div>
+      <div class="ct" style="margin-bottom:4px">${title} — ${cy}</div>
+      <div class="cs" style="margin-bottom:14px">${subtitle} (${$0(defaultVal)}).</div>
       ${ML.map((name, m) => {
         const k = `${cy}-${m}`;
-        const v = S.set.incomeByMonth[k];
+        const v = S.set[mapKey][k];
         const isCur = m === TODAY.getMonth();
         return `<div class="set-row">
-          <div><div class="set-l">${name}${isCur?' <span class="pill pr" style="vertical-align:2px">NOW</span>':''}</div>
-          <div class="set-s">Paid ${MS[m]} 27</div></div>
-          <input class="set-inp" type="number" inputmode="decimal" placeholder="${S.set.income}" value="${v??''}"
-            onchange="setMonthIncome('${k}', this.value)">
+          <div><div class="set-l">${name}${isCur?' <span class="pill pr" style="vertical-align:2px">NOW</span>':''}</div></div>
+          <input class="set-inp" type="number" inputmode="decimal" placeholder="${defaultVal}" value="${v??''}"
+            onchange="setMonthVal('${mapKey}','${k}', this.value)">
         </div>`;
       }).join('')}
     </div>
@@ -645,7 +727,7 @@ function vRecurring() {
       ${S.recurring.map((r,i)=>`<div class="txi">
         <div class="row">
           <div class="row" style="gap:0;min-width:0">
-            <div class="txd" style="background:${CC[r.cat]||'#64748b'}"></div>
+            <div class="txd" style="background:${CC[r.cat]||'#64748b'};color:${CC[r.cat]||'#64748b'}"></div>
             <div><div class="txn">${esc(r.desc)}</div>
             <div class="txs">Next: ${sd(r.next)} &middot; ${r.cat} ${r.type==='expense'?`<span class="pill ${r.pm==='credit'?'pk':'pc'}">${r.pm.toUpperCase()}</span>`:''}</div></div>
           </div>
@@ -660,10 +742,10 @@ function vRecurring() {
 }
 
 /* ---------- actions ---------- */
-function setMonthIncome(key, val) {
-  if (val === '' || val === null) delete S.set.incomeByMonth[key];
-  else S.set.incomeByMonth[key] = +val || 0;
-  save(); render(); toast('Income updated');
+function setMonthVal(mapKey, key, val) {
+  if (val === '' || val === null) delete S.set[mapKey][key];
+  else S.set[mapKey][key] = +val || 0;
+  save(); render(); toast('Updated');
 }
 function startEdit(id){ const t = S.txs.find(x=>x.id===id); if(!t) return; S.editId=id; S.editForm={...t}; render(); }
 function saveEdit(id){
