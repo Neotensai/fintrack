@@ -1,9 +1,10 @@
 'use strict';
-/* FinTrack v3
-   - month net counts cash only; credit purchases shown separately
-   - forecast input no longer reversed (partial re-render)
-   - recovery model: editable assumptions, variable income aware, 50/30/20 check
-   - monthly savings targets with approach warnings */
+/* FinTrack v4
+   Pay-period model. A "month" runs from one payday to the next.
+   Payday = 27th, adjusted: Saturday 27th -> Friday 26th (back),
+                           Sunday 27th  -> Monday 28th (forward).
+   Income lands and credit clears on the adjusted payday.
+   Ledger, net, savings target and pace are all scoped to the pay period. */
 
 const TODAY = new Date();
 const YEAR = TODAY.getFullYear();
@@ -14,6 +15,7 @@ const CC = {Housing:'#6366f1',Food:'#34d399',Utilities:'#fbbf24',Transport:'#3b8
 const KEY = 'fintrack-v1';
 
 function isoOf(d){ return d.toISOString().split('T')[0]; }
+function dnum(d){ return d.getFullYear()*10000 + d.getMonth()*100 + d.getDate(); }
 
 const DEFAULTS = {
   set: { startBal: 30000, startDate: isoOf(TODAY), income: 4500, incomeByMonth: {},
@@ -49,7 +51,32 @@ function save() {
   } catch(e){}
 }
 
-/* ---------- per-month settings (income & savings target) ---------- */
+/* ---------- adjusted payday (the heart of v4) ---------- */
+function adjustedPayday(y, m) {
+  const d = new Date(y, m, 27, 12);
+  const dow = d.getDay();           // 0 Sun ... 6 Sat
+  if (dow === 6) d.setDate(26);     // Saturday -> Friday before
+  else if (dow === 0) d.setDate(28);// Sunday   -> Monday after
+  return d;
+}
+function nextPaydayAfter(y, m) {
+  const ny = m === 11 ? y + 1 : y, nm = m === 11 ? 0 : m + 1;
+  return adjustedPayday(ny, nm);
+}
+// which pay period a date falls in -> identified by {y,m} of the period's starting payday
+function periodOf(date) {
+  let y = date.getFullYear(), m = date.getMonth();
+  if (dnum(date) < dnum(adjustedPayday(y, m))) { m--; if (m < 0) { m = 11; y--; } }
+  return { y, m };
+}
+function inPeriod(dateStr, py, pm) {
+  const d = new Date(dateStr + 'T12:00:00');
+  const start = adjustedPayday(py, pm);
+  const end = nextPaydayAfter(py, pm);
+  return dnum(d) >= dnum(start) && dnum(d) < dnum(end);
+}
+
+/* ---------- per-month settings (keyed by the period's payday month) ---------- */
 function incomeFor(y, m) {
   const v = S.set.incomeByMonth[`${y}-${m}`];
   return (v === undefined || v === null || v === '') ? S.set.income : +v;
@@ -58,14 +85,13 @@ function saveFor(y, m) {
   const v = S.set.saveByMonth[`${y}-${m}`];
   return (v === undefined || v === null || v === '') ? S.set.saveTarget : +v;
 }
-function payday(y, m) { return new Date(y, m, 27, 12); }
 
 /* ---------- recurring engine ---------- */
 function postRecurring() {
   let posted = 0;
   for (const r of S.recurring) {
     let next = new Date(r.next + 'T12:00:00');
-    while (next <= TODAY) {
+    while (dnum(next) <= dnum(TODAY)) {
       S.txs.push({ id: Date.now() + Math.random(), desc: r.desc, amt: r.amt, date: isoOf(next), type: r.type, pm: r.pm, cat: r.cat, fromRec: true });
       next.setMonth(next.getMonth() + 1);
       posted++;
@@ -77,10 +103,12 @@ function postRecurring() {
 }
 
 /* ---------- helpers ---------- */
-function clrDate(ds){ const d = new Date(ds + 'T12:00:00'); d.setMonth(d.getMonth()+3); d.setDate(27); return d; }
+// credit clears 3 months after purchase, on that month's adjusted payday
+function clrDate(ds){ const d = new Date(ds + 'T12:00:00'); d.setMonth(d.getMonth() + 3); return adjustedPayday(d.getFullYear(), d.getMonth()); }
 function $$(n){ const s = n<0?'-':''; return s+'$'+Math.abs(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); }
 function $0(n){ const s = n<0?'-':''; return s+'$'+Math.round(Math.abs(n)).toLocaleString('en-US'); }
 function sd(s){ return new Date(s+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}); }
+function sdD(d){ return d.toLocaleDateString('en-US',{month:'short',day:'numeric'}); }
 function ld(d){ return d.toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'}); }
 function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function toast(msg){
@@ -89,21 +117,26 @@ function toast(msg){
   clearTimeout(t._h); t._h = setTimeout(()=>t.classList.remove('show'), 2200);
 }
 
-/* ---------- balance at any date ---------- */
+/* ---------- balance at any date ----------
+   startBal is the balance ON startDate (already includes any pay received up to and
+   including that day). Paydays strictly AFTER startDate accrue. Cash applies on its
+   date; credit on its clearance (adjusted) date. All compared by calendar day. */
 function balAt(date) {
   let b = S.set.startBal;
-  const sd0 = new Date(S.set.startDate + 'T00:00:00');
-  let p = payday(sd0.getFullYear(), sd0.getMonth());
-  if (p < sd0) p = payday(sd0.getFullYear(), sd0.getMonth() + 1);
-  while (p <= date) {
-    b += incomeFor(p.getFullYear(), p.getMonth());
-    p = payday(p.getFullYear(), p.getMonth() + 1);
+  const sd0 = new Date(S.set.startDate + 'T12:00:00');
+  const dq = dnum(date), ds0 = dnum(sd0);
+  let y = sd0.getFullYear(), m = sd0.getMonth();
+  for (let i = 0; i < 1200; i++) {
+    const pd = adjustedPayday(y, m);
+    if (dnum(pd) > dq) break;
+    if (dnum(pd) > ds0) b += incomeFor(y, m);
+    m++; if (m > 11) { m = 0; y++; }
   }
   for (const t of S.txs) {
     const d = new Date(t.date + 'T12:00:00');
-    if (t.type === 'income') { if (d <= date) b += t.amt; }
-    else if (t.pm === 'cash') { if (d <= date) b -= t.amt; }
-    else { if (clrDate(t.date) <= date) b -= t.amt; }
+    if (t.type === 'income') { if (dnum(d) <= dq) b += t.amt; }
+    else if (t.pm === 'cash') { if (dnum(d) <= dq) b -= t.amt; }
+    else { if (dnum(clrDate(t.date)) <= dq) b -= t.amt; }
   }
   return b;
 }
@@ -111,7 +144,8 @@ function balAt(date) {
 /* ---------- core computation ---------- */
 function compute() {
   const { txs } = S;
-  const now = TODAY, cm = now.getMonth(), cy = now.getFullYear();
+  const now = TODAY;
+  const nowNoon = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 12);
 
   const bal = balAt(now);
 
@@ -119,21 +153,20 @@ function compute() {
   for (const t of txs) {
     if (t.type === 'expense' && t.pm === 'credit') {
       const cd = clrDate(t.date);
-      if (cd > now) pend.push({ ...t, cd });
+      if (dnum(cd) > dnum(now)) pend.push({ ...t, cd });
     }
   }
-  const d90 = new Date(now); d90.setDate(d90.getDate() + 90);
-  const p90 = pend.filter(t => t.cd <= d90).reduce((s,t)=>s+t.amt, 0);
+  const d90 = new Date(nowNoon); d90.setDate(d90.getDate() + 90);
+  const p90 = pend.filter(t => dnum(t.cd) <= dnum(d90)).reduce((s,t)=>s+t.amt, 0);
   const ptot = pend.reduce((s,t)=>s+t.amt, 0);
   const gm = {};
   for (const t of pend) {
-    const k = t.cd.toDateString();
+    const k = dnum(t.cd);
     if (!gm[k]) gm[k] = { date: t.cd, items: [], total: 0 };
     gm[k].items.push(t); gm[k].total += t.amt;
   }
   const pGroups = Object.values(gm).sort((a,b)=>a.date-b.date);
 
-  // avg monthly expenses from history (cash + credit by purchase month)
   const ebm = {};
   for (const t of txs) {
     if (t.type === 'expense') {
@@ -142,66 +175,58 @@ function compute() {
     }
   }
   const ev = Object.values(ebm);
-  const avgExpHist = ev.length ? ev.reduce((a,b)=>a+b,0)/ev.length : incomeFor(cy,cm) * 0.65;
+  const cur = periodOf(now);
+  const avgExpHist = ev.length ? ev.reduce((a,b)=>a+b,0)/ev.length : incomeFor(cur.y,cur.m) * 0.65;
 
-  // forecast model assumptions (user overrides win)
   let inc12 = 0;
-  for (let m = 0; m < 12; m++) {
-    const fd = new Date(cy, cm + m, 1);
+  for (let k = 0; k < 12; k++) {
+    const fd = new Date(now.getFullYear(), now.getMonth() + k, 1);
     inc12 += incomeFor(fd.getFullYear(), fd.getMonth());
   }
   const avgInc12 = inc12 / 12;
-  const fcIncome = (S.set.fcIncome !== '' && S.set.fcIncome !== null && S.set.fcIncome !== undefined && +S.set.fcIncome > 0) ? +S.set.fcIncome : avgInc12;
-  const fcExp = (S.set.fcExp !== '' && S.set.fcExp !== null && S.set.fcExp !== undefined && +S.set.fcExp > 0) ? +S.set.fcExp : avgExpHist;
+  const fcIncome = (S.set.fcIncome !== '' && S.set.fcIncome != null && +S.set.fcIncome > 0) ? +S.set.fcIncome : avgInc12;
+  const fcExp = (S.set.fcExp !== '' && S.set.fcExp != null && +S.set.fcExp > 0) ? +S.set.fcExp : avgExpHist;
   const sb = fcExp * 3;
 
-  // next 27th: payday + clearance
-  const day = now.getDate();
-  let n27, dd27;
-  if (day < 27) { n27 = payday(cy, cm); dd27 = 27 - day; }
-  else if (day === 27) { n27 = payday(cy, cm); dd27 = 0; }
-  else { n27 = payday(cy, cm + 1); dd27 = (new Date(cy, cm + 1, 0).getDate() - day) + 27; }
-  let prog;
-  if (day <= 27) { const l27 = payday(cm?cy:cy-1, cm?cm-1:11); prog = Math.min(100, ((now-l27)/(n27-l27))*100); }
-  else { const l27 = payday(cy, cm); prog = Math.min(100, ((now-l27)/(n27-l27))*100); }
-  const a27 = gm[n27.toDateString()]?.total || 0;
-  const pay27 = incomeFor(n27.getFullYear(), n27.getMonth());
+  const pStart = adjustedPayday(cur.y, cur.m);
+  const pEnd = nextPaydayAfter(cur.y, cur.m);
+  const pTxs = txs.filter(t => inPeriod(t.date, cur.y, cur.m)).sort((a,b)=> new Date(b.date) - new Date(a.date));
+  const pIncomeBase = incomeFor(cur.y, cur.m);
+  const pExtra = pTxs.filter(t=>t.type==='income').reduce((s,t)=>s+t.amt,0);
+  const mInc = pIncomeBase + pExtra;
+  const mCash = pTxs.filter(t=>t.type==='expense' && t.pm==='cash').reduce((s,t)=>s+t.amt,0);
+  const mCredit = pTxs.filter(t=>t.type==='expense' && t.pm==='credit').reduce((s,t)=>s+t.amt,0);
+  const mNet = mInc - mCash;
+  const mCommitted = mCash + mCredit;
 
-  // current month: cash and credit split
-  const mTxs = txs.filter(t => { const d = new Date(t.date+'T12:00:00'); return d.getMonth()===cm && d.getFullYear()===cy; })
-                  .sort((a,b)=> new Date(b.date) - new Date(a.date));
-  const mIncome = incomeFor(cy, cm);
-  const salaryReceived = day >= 27;
-  const mInc = mIncome + mTxs.filter(t=>t.type==='income').reduce((s,t)=>s+t.amt,0);
-  const mCash = mTxs.filter(t=>t.type==='expense' && t.pm==='cash').reduce((s,t)=>s+t.amt,0);
-  const mCredit = mTxs.filter(t=>t.type==='expense' && t.pm==='credit').reduce((s,t)=>s+t.amt,0);
-  const mNet = mInc - mCash;            // credit excluded: it hits in 3 months
-  const mCommitted = mCash + mCredit;   // total spending committed this month
-
-  // pace: committed spend vs month elapsed
-  const dim = new Date(cy, cm + 1, 0).getDate();
-  const monthPct = (day / dim) * 100;
+  const totalDays = Math.max(1, Math.round((pEnd - pStart)/86400000));
+  const elapsedDays = Math.max(0, Math.min(totalDays, Math.round((nowNoon - pStart)/86400000)));
+  const periodPct = (elapsedDays / totalDays) * 100;
   const spendPct = mInc > 0 ? (mCommitted / mInc) * 100 : 0;
-  const pace = spendPct - monthPct;
+  const pace = spendPct - periodPct;
 
-  // savings target for this month
-  const sTarget = saveFor(cy, cm);
+  const sTarget = saveFor(cur.y, cur.m);
   const allowedSpend = Math.max(0, mInc - sTarget);
   const projSave = mInc - mCommitted;
   const savePct = allowedSpend > 0 ? (mCommitted / allowedSpend) * 100 : (mCommitted>0?999:0);
   const saveStatus = savePct >= 100 ? 'missed' : savePct >= 80 ? 'close' : 'ok';
 
-  const catSpend = {};
-  for (const t of mTxs) if (t.type === 'expense') catSpend[t.cat] = (catSpend[t.cat]||0) + t.amt;
+  const daysToNext = Math.max(0, Math.round((pEnd - nowNoon)/86400000));
+  const prog = Math.min(100, Math.max(0, ((nowNoon - pStart)/(pEnd - pStart))*100));
+  const a27 = gm[dnum(pEnd)]?.total || 0;
+  const payNext = incomeFor(pEnd.getFullYear(), pEnd.getMonth());
 
-  // year data
+  const catSpend = {};
+  for (const t of pTxs) if (t.type === 'expense') catSpend[t.cat] = (catSpend[t.cat]||0) + t.amt;
+
   const ydata = [];
   for (let m = 0; m < 12; m++) {
+    const start = adjustedPayday(YEAR, m);
+    const end = nextPaydayAfter(YEAR, m);
     let ce = 0, cc = 0, cp = 0, ei = 0;
     const mt = [];
     for (const t of txs) {
-      const d = new Date(t.date + 'T12:00:00');
-      if (d.getMonth() === m && d.getFullYear() === YEAR) {
+      if (inPeriod(t.date, YEAR, m)) {
         mt.push(t);
         if (t.type === 'income') ei += t.amt;
         else if (t.pm === 'cash') ce += t.amt;
@@ -209,19 +234,22 @@ function compute() {
       }
       if (t.type === 'expense' && t.pm === 'credit') {
         const cd = clrDate(t.date);
-        if (cd.getMonth() === m && cd.getFullYear() === YEAR) cc += t.amt;
+        if (dnum(cd) >= dnum(start) && dnum(cd) < dnum(end)) cc += t.amt;
       }
     }
-    const ti = incomeFor(YEAR, m) + ei, net = ti - ce - cc;
-    const endBal = balAt(new Date(YEAR, m + 1, 0, 23, 59));
+    const ti = incomeFor(YEAR, m) + ei;
+    const net = ti - ce - cc;
+    const endBal = balAt(new Date(end.getTime() - 86400000));
     const tgt = saveFor(YEAR, m);
     const saved = ti - ce - cp;
-    ydata.push({ m, mt, ti, ce, cc, cp, net, endBal, tgt, saved, isCur: m === cm, isFut: m > cm });
+    const isCur = (m === cur.m && YEAR === cur.y);
+    const isFut = dnum(start) > dnum(now);
+    ydata.push({ m, start, end, mt, ti, ce, cc, cp, net, endBal, tgt, saved, isCur, isFut });
   }
 
-  return { bal, pend, p90, ptot, pGroups, avgExpHist, avgInc12, fcIncome, fcExp, sb,
-           n27, dd27, prog, a27, pay27, mTxs, mInc, mCash, mCredit, mNet, mCommitted,
-           mIncome, salaryReceived, pace, monthPct, spendPct,
+  return { bal, cur, pStart, pEnd, pend, p90, ptot, pGroups, avgExpHist, avgInc12, fcIncome, fcExp, sb,
+           daysToNext, prog, a27, payNext, pTxs, mInc, mCash, mCredit, mNet, mCommitted,
+           pace, periodPct, spendPct, totalDays, elapsedDays,
            sTarget, allowedSpend, projSave, savePct, saveStatus, catSpend, ydata };
 }
 
@@ -243,7 +271,7 @@ function svgYearChart(C) {
     const ly = 8 + (1 - (d.endBal - minB) / (maxB - minB || 1)) * (H - padB - 16);
     line += (i ? 'L' : 'M') + (x + bw/2).toFixed(1) + ',' + ly.toFixed(1) + ' ';
   });
-  return `<svg class="svgline" viewBox="0 0 ${W} ${H}" role="img" aria-label="Monthly income and expenses for ${YEAR} with balance trend line">
+  return `<svg class="svgline" viewBox="0 0 ${W} ${H}" role="img" aria-label="Income and expenses per pay period for ${YEAR} with balance trend line">
     ${bars}<path d="${line}" stroke="#8b5cf6" stroke-width="2" fill="none" stroke-linecap="round"/></svg>`;
 }
 
@@ -253,16 +281,13 @@ function svgProjection(C, forecast) {
   for (const t of S.txs) {
     if (t.type === 'expense' && t.pm === 'credit') {
       const cd = clrDate(t.date);
-      if (cd > TODAY) {
-        const k = `${cd.getFullYear()}-${cd.getMonth()}`;
-        pendByMonth[k] = (pendByMonth[k]||0) + t.amt;
-      }
+      if (dnum(cd) > dnum(TODAY)) pendByMonth[`${cd.getFullYear()}-${cd.getMonth()}`] = (pendByMonth[`${cd.getFullYear()}-${cd.getMonth()}`]||0) + t.amt;
     }
   }
   const base = [C.bal], post = [C.bal - forecast.cost];
   const labels = ['Now'];
-  for (let m = 1; m <= 11; m++) {
-    const fd = new Date(TODAY.getFullYear(), TODAY.getMonth() + m, 1);
+  for (let k = 1; k <= 11; k++) {
+    const fd = new Date(TODAY.getFullYear(), TODAY.getMonth() + k, 1);
     const hit = pendByMonth[`${fd.getFullYear()}-${fd.getMonth()}`] || 0;
     const inc = incomeFor(fd.getFullYear(), fd.getMonth());
     base.push(base[base.length-1] + inc - C.fcExp - hit);
@@ -333,7 +358,7 @@ function txItem(t) {
 /* ---------- views ---------- */
 function vHome(C) {
   const paceColor = C.pace > 10 ? 'var(--red)' : C.pace > 0 ? 'var(--amb)' : 'var(--grn)';
-  const paceMsg = C.pace > 10 ? 'Spending much faster than the month is passing'
+  const paceMsg = C.pace > 10 ? 'Spending much faster than the period is passing'
     : C.pace > 0 ? 'Slightly ahead of pace — ease off a little'
     : 'On pace — spending is under control';
   const sCol = C.saveStatus==='missed' ? 'var(--red)' : C.saveStatus==='close' ? 'var(--amb)' : 'var(--grn)';
@@ -342,30 +367,31 @@ function vHome(C) {
     : C.saveStatus==='close'
       ? `Careful — only ${$0(C.allowedSpend - C.mCommitted)} of spending left before you eat into your ${$0(C.sTarget)} target.`
       : `On track — you can still spend ${$0(C.allowedSpend - C.mCommitted)} and hit your ${$0(C.sTarget)} target.`;
+  const periodLabel = `${sdD(C.pStart)} → ${sdD(C.pEnd)}`;
   return `
   <div class="pg">
     <div class="kpi hero">
       <div class="row"><div class="kl">Overall balance</div><div class="kl">${$0(C.ptot)} deferred</div></div>
       <div class="kv">${$$(C.bal)}</div>
       <div class="pt"><div class="pb" style="width:${Math.min(100,Math.max(3,C.bal/(C.bal+C.ptot+1)*100)).toFixed(1)}%"></div></div>
-      <div class="ks">Payday in ${C.dd27===0?'— today':C.dd27+' days'}: <b>+${$0(C.pay27)}</b>${C.a27>0?` &middot; credit clearing: <b>−${$0(C.a27)}</b>`:''}</div>
+      <div class="ks">Period <b>${periodLabel}</b> &middot; next payday in ${C.daysToNext===0?'— today':C.daysToNext+'d'}: <b>+${$0(C.payNext)}</b>${C.a27>0?` &middot; clearing <b>−${$0(C.a27)}</b>`:''}</div>
     </div>
     <div class="k2">
       <div class="kpi sm">
-        <div class="kl">${ML[TODAY.getMonth()]} net</div>
+        <div class="kl">Period net</div>
         <div class="kv" style="color:${C.mNet>=0?'var(--grn)':'var(--red)'}">${$0(C.mNet)}</div>
         <div class="ks">+${$0(C.mInc)} &middot; cash −${$0(C.mCash)}</div>
-        <div class="ks" style="color:${C.salaryReceived?'var(--grn)':'var(--amb)'}">${C.salaryReceived?'salary received':'salary on the 27th'}</div>
+        <div class="ks" style="color:var(--tx3)">${periodLabel}</div>
       </div>
       <div class="kpi sm">
         <div class="kl">Credit spent</div>
         <div class="kv" style="color:${C.mCredit>0?'var(--amb)':'var(--tx3)'}">${$0(C.mCredit)}</div>
-        <div class="ks">this month, on card</div>
-        <div class="ks" style="color:var(--tx3)">deducts in 3 months on the 27th</div>
+        <div class="ks">this period, on card</div>
+        <div class="ks" style="color:var(--tx3)">deducts in 3 months on payday</div>
       </div>
     </div>
     <div class="kpi sm" style="margin-bottom:11px">
-      <div class="row"><div class="kl">Savings target &middot; ${ML[TODAY.getMonth()].slice(0,3)}</div>
+      <div class="row"><div class="kl">Savings target</div>
         <div style="font-size:11px;font-weight:800;color:${sCol}">${$0(C.projSave)} / ${$0(C.sTarget)} projected</div></div>
       <div class="gauge" style="margin-top:9px;height:9px">
         <div class="gfill" style="width:${Math.min(100,C.savePct).toFixed(1)}%;background:${sCol}"></div>
@@ -374,19 +400,19 @@ function vHome(C) {
     </div>
     <div class="kpi sm" style="margin-bottom:11px">
       <div class="row"><div class="kl">Spending pace</div>
-        <div style="font-size:11px;font-weight:800;color:${paceColor}">${Math.round(C.spendPct)}% committed &middot; ${Math.round(C.monthPct)}% of month</div></div>
+        <div style="font-size:11px;font-weight:800;color:${paceColor}">${Math.round(C.spendPct)}% committed &middot; day ${C.elapsedDays}/${C.totalDays}</div></div>
       <div class="gauge" style="margin-top:9px;height:9px">
         <div class="gfill" style="width:${Math.min(100,C.spendPct).toFixed(1)}%;background:${paceColor}"></div>
-        <div style="position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--tx2);left:${Math.min(100,C.monthPct).toFixed(1)}%"></div>
+        <div style="position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--tx2);left:${Math.min(100,C.periodPct).toFixed(1)}%"></div>
       </div>
       <div class="ks" style="margin-top:7px;color:${paceColor}">${paceMsg}</div>
     </div>
 
-    <div class="sec-h"><div class="sec-t">${ML[TODAY.getMonth()]} ledger</div>
+    <div class="sec-h"><div class="sec-t">Current period ledger</div>
       <button class="chip" onclick="S.tab='add';render()">+ Add</button></div>
-    ${C.mTxs.length === 0
-      ? `<div class="card"><div class="emp">No transactions yet this month.<br>Tap + Add to record your first one.</div></div>`
-      : C.mTxs.map(txItem).join('')}
+    ${C.pTxs.length === 0
+      ? `<div class="card"><div class="emp">No transactions yet this period.<br>Tap + Add to record your first one.</div></div>`
+      : C.pTxs.map(txItem).join('')}
 
     <div class="sec-h" style="margin-top:16px"><div class="sec-t">Pending credit pipeline</div>
       <div class="sec-t" style="color:var(--amb)">${$0(C.ptot)}</div></div>
@@ -397,7 +423,7 @@ function vHome(C) {
         return `<div class="plg ${i===0?'nx':''}">
           <div class="row" style="margin-bottom:6px">
             <div><div class="pld" style="${i===0?'color:var(--amb)':''}">${ld(g.date)}</div>
-            <div class="plds">${dAway===0?'Today':dAway===1?'Tomorrow':'In '+dAway+' days'} &middot; payday too: +${$0(incomeFor(g.date.getFullYear(),g.date.getMonth()))}</div></div>
+            <div class="plds">${dAway<=0?'Today':dAway===1?'Tomorrow':'In '+dAway+' days'} &middot; payday too: +${$0(incomeFor(g.date.getFullYear(),g.date.getMonth()))}</div></div>
             <div class="plt">-${$$(g.total)}</div>
           </div>
           ${g.items.map(it=>`<div class="pli"><span style="color:var(--tx2)">${esc(it.desc)}</span><span style="font-weight:700">${$$(it.amt)}</span></div>`).join('')}
@@ -410,7 +436,8 @@ function vYear(C) {
   return `
   <div class="pg">
     <div class="card">
-      <div class="ct" style="margin-bottom:10px">${YEAR} overview</div>
+      <div class="ct" style="margin-bottom:3px">${YEAR} pay periods</div>
+      <div class="cs" style="margin-bottom:10px">Each cycle runs payday to payday. Labelled by the month its payday falls in.</div>
       ${svgYearChart(C)}
       <div class="lgnd">
         <span class="lgi"><span class="lgbox" style="background:rgba(52,211,153,.8)"></span>Income</span>
@@ -429,6 +456,7 @@ function vYear(C) {
           ${md.isFut?`<span class="mtag" style="color:var(--tx3);border:1px solid var(--bd)">projected</span>`:''}</div>
         <div style="font-size:15px;font-weight:800;color:${md.net>=0?'var(--grn)':'var(--red)'}">${md.net>=0?'+':''}${$0(md.net)}</div>
       </div>
+      <div class="ks" style="margin-top:2px;color:var(--tx3)">${sdD(md.start)} → ${sdD(md.end)}</div>
       <div class="row" style="margin-top:7px;font-size:11px;color:var(--tx3)">
         <span>In <b style="color:var(--grn)">${$0(md.ti)}</b> &middot; Cash <b style="color:${md.ce>0?'var(--red)':'var(--tx3)'}">${$0(md.ce)}</b>${md.cp>0?` &middot; Card <b style="color:var(--amb)">${$0(md.cp)}</b>`:''}${md.cc>0?` &middot; Clears <b style="color:var(--amb)">${$0(md.cc)}</b>`:''}</span>
         <span>End: <b style="color:${md.endBal>=0?'var(--tx)':'var(--red)'}">${$0(md.endBal)}</b></span>
@@ -472,19 +500,19 @@ function vAdd() {
         <div class="seg">
           <button class="segb ${f.pm==='cash'?'a':''}" onclick="S.form.pm='cash';render()">Cash &middot; instant</button>
           <button class="segb ${f.pm==='credit'?'a':''}" onclick="S.form.pm='credit';render()">Credit &middot; 3-mo lag</button>
-        </div></div>` : `<div class="cn" style="background:rgba(52,211,153,.06);border-color:rgba(52,211,153,.3)">Use this for extra income only (freelance, gifts, refunds). Your salary is added automatically on the 27th — set the amounts in Settings &rarr; Income by month.</div>`}
+        </div></div>` : `<div class="cn" style="background:rgba(52,211,153,.06);border-color:rgba(52,211,153,.3)">Use this for extra income only (freelance, gifts, refunds). Your salary is added automatically on each payday — set the amounts in Settings &rarr; Income by period.</div>`}
       <div class="fg"><label class="flab">Category</label>
         <select class="finp" id="f-cat" onchange="S.form.cat=this.value">
           ${CATS.map(c=>`<option ${f.cat===c?'selected':''}>${c}</option>`).join('')}</select></div>
       <label class="chk fg"><input type="checkbox" ${f.recurring?'checked':''} onchange="S.form.recurring=this.checked">
         <span>Repeats monthly (subscription / bill)</span></label>
-      ${showCredit ? `<div class="cn">Credit lag active: this charge deducts from your balance on <b style="color:var(--amb)">${ld(clrDate(f.date))}</b> — 3 months after purchase. Until then it shows under "Credit spent", not in your monthly net.</div>` : ''}
+      ${showCredit ? `<div class="cn">Credit lag active: this charge deducts from your balance on <b style="color:var(--amb)">${ld(clrDate(f.date))}</b> — 3 months after purchase, on that period's payday. Until then it shows under "Credit spent", not in your period net.</div>` : ''}
       <button class="bp" onclick="addTx()">Add transaction</button>
     </div>
   </div>`;
 }
 
-/* ---------- forecast (input fixed: results render separately) ---------- */
+/* ---------- forecast ---------- */
 function fcResults(C) {
   const fc = parseFloat(S.forecastAmt);
   if (!(fc > 0)) return `<div class="emp">Enter an amount above to get a verdict.</div>`;
@@ -498,7 +526,7 @@ function fcResults(C) {
   const surplus = C.fcIncome - C.fcExp;
   const recovMo = surplus > 0 ? Math.ceil(f.cost / surplus) : null;
   const recovDate = recovMo ? new Date(TODAY.getFullYear(), TODAY.getMonth()+recovMo, 1) : null;
-  const disc = C.fcIncome * 0.30; // 50/30/20 discretionary share
+  const disc = C.fcIncome * 0.30;
   const discMonths = disc > 0 ? f.cost / disc : 0;
   return `
   <div class="verd" style="background:${VS[f.status].bg};border:2px solid ${VS[f.status].bd}">
@@ -558,7 +586,7 @@ function vForecast(C) {
           <label class="flab">Avg monthly income</label>
           <input class="finp" type="number" inputmode="decimal" placeholder="${Math.round(C.avgInc12)}" value="${S.set.fcIncome}"
             onchange="S.set.fcIncome=this.value;save();render()">
-          <div class="ks" style="margin-top:4px">blank = auto from your next 12 months (${$0(C.avgInc12)})</div>
+          <div class="ks" style="margin-top:4px">blank = auto from your next 12 paydays (${$0(C.avgInc12)})</div>
         </div>
         <div>
           <label class="flab">Avg monthly expenses</label>
@@ -576,45 +604,45 @@ function vSettings(C) {
   if (S.subview === 'budgets') return vBudgets(C);
   if (S.subview === 'goals') return vGoals(C);
   if (S.subview === 'recurring') return vRecurring();
-  if (S.subview === 'income') return vMonthEditor('Income by month', 'incomeByMonth', S.set.income, 'Paid on the 27th. Empty months use the default');
-  if (S.subview === 'savings') return vMonthEditor('Savings target by month', 'saveByMonth', S.set.saveTarget, 'How much you want left over each month. Empty months use the default');
+  if (S.subview === 'income') return vMonthEditor('Income by period', 'incomeByMonth', S.set.income, 'Lands on each payday. Empty periods use the default');
+  if (S.subview === 'savings') return vMonthEditor('Savings target by period', 'saveByMonth', S.set.saveTarget, 'How much you want left over each period. Empty periods use the default');
   return `
   <div class="pg">
     <div class="card">
       <div class="ct" style="margin-bottom:6px">Income &amp; balance</div>
       <div class="set-row">
-        <div><div class="set-l">Default monthly income</div><div class="set-s">Paid on the 27th. Used when a month has no custom amount</div></div>
+        <div><div class="set-l">Default income</div><div class="set-s">Lands on each payday (27th, shifted off weekends)</div></div>
         <input class="set-inp" type="number" inputmode="decimal" value="${S.set.income}" onchange="S.set.income=+this.value||0;save();render()">
       </div>
       <div class="set-row" onclick="S.subview='income';render()" style="cursor:pointer">
-        <div><div class="set-l">Income by month</div><div class="set-s">Set the actual amount for each month</div></div>
+        <div><div class="set-l">Income by period</div><div class="set-s">Set the actual amount for each period</div></div>
         <span style="color:var(--tx3)">&rsaquo;</span></div>
       <div class="set-row">
-        <div><div class="set-l">Default savings target</div><div class="set-s">How much you aim to keep each month</div></div>
+        <div><div class="set-l">Default savings target</div><div class="set-s">How much you aim to keep each period</div></div>
         <input class="set-inp" type="number" inputmode="decimal" value="${S.set.saveTarget}" onchange="S.set.saveTarget=+this.value||0;save();render()">
       </div>
       <div class="set-row" onclick="S.subview='savings';render()" style="cursor:pointer">
-        <div><div class="set-l">Savings target by month</div><div class="set-s">Set a different target per month</div></div>
+        <div><div class="set-l">Savings target by period</div><div class="set-s">Set a different target per period</div></div>
         <span style="color:var(--tx3)">&rsaquo;</span></div>
       <div class="set-row">
         <div><div class="set-l">Balance</div><div class="set-s">Your liquidity on the date below</div></div>
         <input class="set-inp" type="number" inputmode="decimal" value="${S.set.startBal}" onchange="S.set.startBal=+this.value||0;save();render()">
       </div>
       <div class="set-row">
-        <div><div class="set-l">As of date</div><div class="set-s">Paydays after this date add to the balance</div></div>
+        <div><div class="set-l">As of date</div><div class="set-s">Set to today, after a payday, for the cleanest start</div></div>
         <input class="set-inp" style="width:150px" type="date" value="${S.set.startDate}" onchange="S.set.startDate=this.value;save();render()">
       </div>
     </div>
     <div class="card">
       <div class="ct" style="margin-bottom:6px">Tools</div>
       <div class="set-row" onclick="S.subview='budgets';render()" style="cursor:pointer">
-        <div><div class="set-l">Category budgets</div><div class="set-s">Monthly limits per category with spend bars</div></div>
+        <div><div class="set-l">Category budgets</div><div class="set-s">Limits per category with spend bars</div></div>
         <span style="color:var(--tx3)">&rsaquo;</span></div>
       <div class="set-row" onclick="S.subview='goals';render()" style="cursor:pointer">
         <div><div class="set-l">Savings goals</div><div class="set-s">${S.goals.length} active goal${S.goals.length!==1?'s':''}</div></div>
         <span style="color:var(--tx3)">&rsaquo;</span></div>
       <div class="set-row" onclick="S.subview='recurring';render()" style="cursor:pointer">
-        <div><div class="set-l">Recurring transactions</div><div class="set-s">${S.recurring.length} subscription${S.recurring.length!==1?'s':''} / bill${S.recurring.length!==1?'s':''} auto-posting</div></div>
+        <div><div class="set-l">Recurring transactions</div><div class="set-s">${S.recurring.length} auto-posting</div></div>
         <span style="color:var(--tx3)">&rsaquo;</span></div>
     </div>
     <div class="card">
@@ -633,7 +661,7 @@ function vSettings(C) {
         <div><div class="set-l" style="color:var(--red)">Reset all data</div><div class="set-s">Start completely fresh</div></div>
         <span style="color:var(--tx3)">&rsaquo;</span></div>
     </div>
-    <div style="text-align:center;font-size:10.5px;color:var(--tx3);padding:6px 0 20px">FinTrack &middot; all data stays on this device</div>
+    <div style="text-align:center;font-size:10.5px;color:var(--tx3);padding:6px 0 20px">FinTrack &middot; pay-period model &middot; all data on this device</div>
   </div>`;
 }
 
@@ -648,9 +676,12 @@ function vMonthEditor(title, mapKey, defaultVal, subtitle) {
       ${ML.map((name, m) => {
         const k = `${cy}-${m}`;
         const v = S.set[mapKey][k];
-        const isCur = m === TODAY.getMonth();
+        const cur = periodOf(TODAY);
+        const isCur = (m === cur.m && cy === cur.y);
+        const start = adjustedPayday(cy, m), end = nextPaydayAfter(cy, m);
         return `<div class="set-row">
-          <div><div class="set-l">${name}${isCur?' <span class="pill pr" style="vertical-align:2px">NOW</span>':''}</div></div>
+          <div><div class="set-l">${name}${isCur?' <span class="pill pr" style="vertical-align:2px">NOW</span>':''}</div>
+          <div class="set-s">${sdD(start)} → ${sdD(end)}</div></div>
           <input class="set-inp" type="number" inputmode="decimal" placeholder="${defaultVal}" value="${v??''}"
             onchange="setMonthVal('${mapKey}','${k}', this.value)">
         </div>`;
@@ -665,7 +696,7 @@ function vBudgets(C) {
     <button class="bk" onclick="S.subview=null;render()">&lsaquo; Settings</button>
     <div class="card">
       <div class="ct" style="margin-bottom:4px">Category budgets</div>
-      <div class="cs" style="margin-bottom:14px">Set a monthly limit per category. Bars show this month's spend. Leave 0 for no limit.</div>
+      <div class="cs" style="margin-bottom:14px">Set a limit per category. Bars show this period's spend. Leave 0 for no limit.</div>
       ${CATS.filter(c=>c!=='Other').map(c => {
         const lim = S.set.budgets[c] || 0;
         const spent = C.catSpend[c] || 0;
