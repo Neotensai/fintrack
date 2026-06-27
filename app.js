@@ -19,7 +19,7 @@ function dnum(d){ return d.getFullYear()*10000 + d.getMonth()*100 + d.getDate();
 
 const DEFAULTS = {
   set: { startBal: 30000, startDate: isoOf(TODAY), income: 4500, incomeByMonth: {},
-         saveTarget: 500, saveByMonth: {}, fcIncome: '', fcExp: '', budgets: {} },
+         saveTarget: 500, saveByMonth: {}, fcIncome: '', fcExp: '', budgets: {}, hideBal: false },
   txs: [],
   recurring: [],
   goals: [],
@@ -105,8 +105,14 @@ function postRecurring() {
 /* ---------- helpers ---------- */
 // credit clears 3 months after purchase, on that month's adjusted payday
 function clrDate(ds){ const d = new Date(ds + 'T12:00:00'); d.setMonth(d.getMonth() + 3); return adjustedPayday(d.getFullYear(), d.getMonth()); }
-function $$(n){ const s = n<0?'-':''; return s+'$'+Math.abs(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); }
-function $0(n){ const s = n<0?'-':''; return s+'$'+Math.round(Math.abs(n)).toLocaleString('en-US'); }
+function $$(n){ const s = n<0?'-':''; return s+'€'+Math.abs(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function $0(n){ const s = n<0?'-':''; return s+'€'+Math.round(Math.abs(n)).toLocaleString('en-US'); }
+// privacy mask for the overall balance when hidden
+function maskBig(s){ return S.set.hideBal ? '€ ••••••' : s; }
+function maskSm(s){ return S.set.hideBal ? '€••••' : s; }
+const EYE_ON = '<svg viewBox="0 0 24 24" style="width:18px;height:18px;stroke:#fff;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+const EYE_OFF = '<svg viewBox="0 0 24 24" style="width:18px;height:18px;stroke:#fff;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+function toggleBal(){ S.set.hideBal = !S.set.hideBal; save(); render(); }
 function sd(s){ return new Date(s+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}); }
 function sdD(d){ return d.toLocaleDateString('en-US',{month:'short',day:'numeric'}); }
 function ld(d){ return d.toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'}); }
@@ -371,8 +377,11 @@ function vHome(C) {
   return `
   <div class="pg">
     <div class="kpi hero">
-      <div class="row"><div class="kl">Overall balance</div><div class="kl">${$0(C.ptot)} deferred</div></div>
-      <div class="kv">${$$(C.bal)}</div>
+      <div class="row"><div class="kl">Overall balance</div><div class="kl">${S.set.hideBal?'•••• deferred':$0(C.ptot)+' deferred'}</div></div>
+      <div class="kv" style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+        <span>${maskBig($$(C.bal))}</span>
+        <button onclick="toggleBal()" aria-label="${S.set.hideBal?'Show balance':'Hide balance'}" style="background:rgba(255,255,255,.16);border:none;border-radius:10px;width:34px;height:34px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;padding:0">${S.set.hideBal?EYE_OFF:EYE_ON}</button>
+      </div>
       <div class="pt"><div class="pb" style="width:${Math.min(100,Math.max(3,C.bal/(C.bal+C.ptot+1)*100)).toFixed(1)}%"></div></div>
       <div class="ks">Period <b>${periodLabel}</b> &middot; next payday in ${C.daysToNext===0?'— today':C.daysToNext+'d'}: <b>+${$0(C.payNext)}</b>${C.a27>0?` &middot; clearing <b>−${$0(C.a27)}</b>`:''}</div>
     </div>
@@ -486,7 +495,7 @@ function vAdd() {
       <div class="fg"><label class="flab">Description</label>
         <input class="finp" id="f-desc" placeholder="e.g. Groceries, Rent..." value="${esc(f.desc)}" oninput="S.form.desc=this.value"></div>
       <div class="fg2">
-        <div class="fg"><label class="flab">Amount ($)</label>
+        <div class="fg"><label class="flab">Amount (€)</label>
           <input class="finp" id="f-amt" type="number" inputmode="decimal" min="0" placeholder="0.00" value="${f.amt}" oninput="S.form.amt=this.value"></div>
         <div class="fg"><label class="flab">Date</label>
           <input class="finp" id="f-date" type="date" value="${f.date}" onchange="S.form.date=this.value;render()"></div>
@@ -573,7 +582,7 @@ function vForecast(C) {
     <div class="card">
       <div class="ct" style="font-size:15px">Can I afford this?</div>
       <div class="cs" style="margin-bottom:13px">Checks the purchase against your balance, pending credit, 3-month safety buffer, the 50/30/20 guideline, and your cash flow recovery rate.</div>
-      <div class="fbig"><label class="flab" style="text-align:center">Purchase amount ($)</label>
+      <div class="fbig"><label class="flab" style="text-align:center">Purchase amount (€)</label>
         <input class="fbiginp" type="number" inputmode="decimal" min="0" placeholder="0" value="${S.forecastAmt}" oninput="fcInput(this.value)"></div>
       <div class="cg3">
         <div class="ccrd"><div class="ccl">Balance</div><div class="ccv" style="color:#a5b4fc">${$0(C.bal)}</div></div>
@@ -740,7 +749,7 @@ function vGoals(C) {
       <div class="divline"></div>
       <div class="fg2">
         <div class="fg"><label class="flab">Goal name</label><input class="finp" id="g-name" placeholder="e.g. New car"></div>
-        <div class="fg"><label class="flab">Target ($)</label><input class="finp" id="g-amt" type="number" inputmode="decimal" placeholder="5000"></div>
+        <div class="fg"><label class="flab">Target (€)</label><input class="finp" id="g-amt" type="number" inputmode="decimal" placeholder="5000"></div>
       </div>
       <button class="bp" onclick="addGoal()">Add goal</button>
     </div>
@@ -873,7 +882,7 @@ function render() {
     <div class="hdr">
       <div class="li">FT</div>
       <div><div class="ln">FinTrack</div><div class="ls">Budget &amp; affordability</div></div>
-      <div class="hd-date">${TODAY.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'})}<br><b style="color:${C.bal>=0?'var(--grn)':'var(--red)'}">${$0(C.bal)}</b></div>
+      <div class="hd-date">${TODAY.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'})}<br><b style="color:${S.set.hideBal?'var(--tx3)':(C.bal>=0?'var(--grn)':'var(--red)')}">${maskSm($0(C.bal))}</b></div>
     </div>
     ${(views[S.tab]||vHome)(C)}
     <nav class="nav">
