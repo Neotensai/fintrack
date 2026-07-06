@@ -23,12 +23,14 @@ const DEFAULTS = {
   txs: [],
   recurring: [],
   goals: [],
+  wishlist: [],
 };
 
 let S = load();
 S.tab = 'home';
 S.editId = null;
 S.forecastAmt = '';
+S.fcMode = 'cash';
 S.subview = null;
 S.form = blankForm();
 
@@ -47,7 +49,7 @@ function load() {
 }
 function save() {
   try {
-    localStorage.setItem(KEY, JSON.stringify({ set:S.set, txs:S.txs, recurring:S.recurring, goals:S.goals }));
+    localStorage.setItem(KEY, JSON.stringify({ set:S.set, txs:S.txs, recurring:S.recurring, goals:S.goals, wishlist:S.wishlist }));
   } catch(e){}
 }
 
@@ -291,8 +293,12 @@ function svgYearChart(C) {
     ${bars}<path d="${line}" stroke="#00a8ff" stroke-width="2" fill="none" stroke-linecap="round"/></svg>`;
 }
 
-function svgProjection(C, forecast) {
-  const W = 340, H = 150, padB = 16;
+/* ---------- forecast projection engine ----------
+   base[] = projected balance now and at each of the next 11 months,
+   fed by per-period incomes, avg expenses, and pending credit clearances.
+   A simulated purchase subtracts its cost from the month it actually HITS:
+   immediately for cash, on the payday ~3 months out for credit. */
+function projBase(C) {
   const pendByMonth = {};
   for (const t of S.txs) {
     if (t.type === 'expense' && t.pm === 'credit') {
@@ -300,22 +306,41 @@ function svgProjection(C, forecast) {
       if (dnum(cd) > dnum(TODAY)) pendByMonth[`${cd.getFullYear()}-${cd.getMonth()}`] = (pendByMonth[`${cd.getFullYear()}-${cd.getMonth()}`]||0) + t.amt;
     }
   }
-  const base = [C.bal], post = [C.bal - forecast.cost];
-  const labels = ['Now'];
+  const base = [C.bal], labels = ['Now'];
   for (let k = 1; k <= 11; k++) {
     const fd = new Date(TODAY.getFullYear(), TODAY.getMonth() + k, 1);
     const hit = pendByMonth[`${fd.getFullYear()}-${fd.getMonth()}`] || 0;
-    const inc = incomeFor(fd.getFullYear(), fd.getMonth());
-    base.push(base[base.length-1] + inc - C.fcExp - hit);
-    post.push(post[post.length-1] + inc - C.fcExp - hit);
+    base.push(base[base.length-1] + incomeFor(fd.getFullYear(), fd.getMonth()) - C.fcExp - hit);
     labels.push(MS[fd.getMonth()]);
   }
+  return { base, labels };
+}
+function purchaseVerdict(C, base, cost, mode, buyK) {
+  const lag = mode === 'credit' ? 3 : 0;
+  const hitK = buyK + lag;
+  if (hitK > 11) return null; // lands beyond the visible horizon
+  const post = base.map((v,i) => i >= hitK ? v - cost : v);
+  let minPost = Infinity, minIdx = hitK;
+  for (let i = hitK; i < post.length; i++) if (post[i] < minPost) { minPost = post[i]; minIdx = i; }
+  const gap = minPost - C.sb;
+  const status = minPost < 0 ? 'red' : gap < 0 ? 'yellow' : 'green';
+  return { post, minPost, minIdx, gap, status, hitK, lag };
+}
+function affordableFrom(C, base, labels, cost, mode) {
+  const lag = mode === 'credit' ? 3 : 0;
+  for (let k = 0; k + lag <= 11; k++) {
+    const v = purchaseVerdict(C, base, cost, mode, k);
+    if (v && v.status === 'green') return { k, label: k === 0 ? 'now' : labels[k] };
+  }
+  return null;
+}
+function svgProjection(C, base, post, labels, sc) {
+  const W = 340, H = 150, padB = 16;
   const all = [...base, ...post, C.sb, 0];
   const mn = Math.min(...all), mx = Math.max(...all);
   const X = i => 8 + (i / 11) * (W - 16);
   const Y = v => 8 + (1 - (v - mn) / (mx - mn || 1)) * (H - padB - 14);
   const path = arr => arr.map((v,i)=>(i?'L':'M')+X(i).toFixed(1)+','+Y(v).toFixed(1)).join(' ');
-  const sc = forecast.status==='red'?'#fb7185':forecast.status==='yellow'?'#fbbf24':'#34d399';
   let lbls = '';
   [0,3,6,9,11].forEach(i => { lbls += `<text x="${X(i).toFixed(1)}" y="${H-3}" font-size="8" fill="#5d6b84" text-anchor="middle" font-weight="700">${labels[i]}</text>`; });
   return `<svg class="svgline" viewBox="0 0 ${W} ${H}" role="img" aria-label="Projected balance over 12 months with and without the purchase">
@@ -545,31 +570,39 @@ function vAdd() {
 function fcResults(C) {
   const fc = parseFloat(S.forecastAmt);
   if (!(fc > 0)) return `<div class="emp">Enter an amount above to get a verdict.</div>`;
-  const ab = C.bal - fc, ac = ab - C.p90, gap = ac - C.sb;
-  const f = { cost: fc, ab, ac, gap, status: ac < 0 ? 'red' : gap < 0 ? 'yellow' : 'green' };
+  const { base, labels } = projBase(C);
+  const v = purchaseVerdict(C, base, fc, S.fcMode, 0);
   const VS = {
     green:{c:'var(--grn)',bg:'rgba(52,211,153,.07)',bd:'rgba(52,211,153,.35)',label:'SAFE TO PURCHASE'},
     yellow:{c:'var(--amb)',bg:'rgba(251,191,36,.07)',bd:'rgba(251,191,36,.35)',label:'PROCEED WITH CAUTION'},
     red:{c:'var(--red)',bg:'rgba(251,113,133,.07)',bd:'rgba(251,113,133,.35)',label:'NOT RECOMMENDED'},
   };
+  const from = v.status === 'green' ? null : affordableFrom(C, base, labels, fc, S.fcMode);
+  const minLabel = v.minIdx === 0 ? 'this month' : 'in ' + labels[v.minIdx];
+  const hitTxt = S.fcMode === 'credit' ? `the charge lands on the ${labels[v.hitK]} payday` : 'the charge hits immediately';
   const surplus = C.fcIncome - C.fcExp;
-  const recovMo = surplus > 0 ? Math.ceil(f.cost / surplus) : null;
+  const recovMo = surplus > 0 ? Math.ceil(fc / surplus) : null;
   const recovDate = recovMo ? new Date(TODAY.getFullYear(), TODAY.getMonth()+recovMo, 1) : null;
   const disc = C.fcIncome * 0.30;
-  const discMonths = disc > 0 ? f.cost / disc : 0;
+  const discMonths = disc > 0 ? fc / disc : 0;
   return `
-  <div class="verd" style="background:${VS[f.status].bg};border:2px solid ${VS[f.status].bd}">
-    <div class="vt" style="color:${VS[f.status].c}">${VS[f.status].label}</div>
+  <div class="verd" style="background:${VS[v.status].bg};border:2px solid ${VS[v.status].bd}">
+    <div class="vt" style="color:${VS[v.status].c}">${VS[v.status].label}</div>
     <div class="vd">${
-      f.status==='green' ? `After buying (${$$(f.cost)}) and settling all pending credit in the next 90 days, you keep ${$$(f.ac)} — ${$$(f.gap)} above your ${$0(C.sb)} safety buffer.`
-      : f.status==='yellow' ? `Technically affordable, but it breaches the safety cushion: balance falls to ${$$(f.ac)}, ${$$( Math.abs(f.gap))} short of the required ${$0(C.sb)} buffer.`
-      : `This would drive your balance to ${$$(f.ac)} after pending credit settles. Avoid or delay this purchase.`
+      v.status==='green' ? `Buying now (${$$(fc)}, ${S.fcMode}): ${hitTxt}. Your lowest projected point is ${$$(v.minPost)} ${minLabel}, ${$$(v.gap)} above the ${$0(C.sb)} safety buffer.`
+      : v.status==='yellow' ? `Survivable but thin: ${hitTxt}, and the projection dips to ${$$(v.minPost)} ${minLabel}, ${$$(Math.abs(v.gap))} short of the ${$0(C.sb)} buffer.${from && from.k>0 ? ` Waiting turns it green: <b style="color:var(--grn)">affordable from ${from.label}</b>.` : ''}`
+      : `This drives your projected balance to ${$$(v.minPost)} ${minLabel}. ${from && from.k>0 ? `Delay it: <b style="color:var(--amb)">affordable from ${from.label}</b>.` : 'Not affordable within the next year at current cash flow.'}`
     }</div>
   </div>
+  ${v.status!=='green' && from ? `<div class="cg3" style="margin-bottom:13px">
+    <div class="ccrd" style="border-color:rgba(52,211,153,.4)"><div class="ccl">Affordable from</div><div class="ccv" style="color:var(--grn)">${from.label.toUpperCase()}</div></div>
+    <div class="ccrd"><div class="ccl">Hit lands</div><div class="ccv" style="color:var(--tx2)">${labels[v.hitK]==='Now'?'NOW':labels[v.hitK].toUpperCase()}</div></div>
+    <div class="ccrd"><div class="ccl">Lowest point</div><div class="ccv" style="color:${VS[v.status].c}">${$0(v.minPost)}</div></div>
+  </div>` : ''}
   <div class="fmlt">Cash flow recovery model</div>
   <div class="cg3" style="margin-bottom:13px">
     <div class="ccrd"><div class="ccl">Surplus / mo</div><div class="ccv" style="color:${surplus>=0?'var(--grn)':'var(--red)'}">${$0(surplus)}</div></div>
-    <div class="ccrd"><div class="ccl">Recovery</div><div class="ccv" style="color:${recovMo?VS[f.status].c:'var(--red)'}">${recovMo?recovMo+' mo':'never'}</div></div>
+    <div class="ccrd"><div class="ccl">Recovery</div><div class="ccv" style="color:${recovMo?VS[v.status].c:'var(--red)'}">${recovMo?recovMo+' mo':'never'}</div></div>
     <div class="ccrd"><div class="ccl">Recovered by</div><div class="ccv" style="font-size:11.5px;color:var(--tx2)">${recovDate?recovDate.toLocaleDateString('en-US',{month:'short',year:'numeric'}):'—'}</div></div>
   </div>
   <div class="cn" style="background:rgba(0,168,255,.06);border-color:rgba(0,168,255,.3)">
@@ -577,16 +610,20 @@ function fcResults(C) {
     This purchase equals <b>${discMonths.toFixed(1)} month${discMonths>=1.95?'s':''}</b> of that allowance${discMonths>3?' — consider spreading or delaying it':''}.
   </div>
   <div class="fmlt">12-month projection</div>
-  ${svgProjection(C, f)}
+  ${svgProjection(C, base, v.post, labels, v.status==='red'?'#fb7185':v.status==='yellow'?'#fbbf24':'#34d399')}
   <div class="lgnd" style="margin-bottom:13px">
     <span class="lgi"><span class="lgline" style="background:#00a8ff"></span>Without purchase</span>
-    <span class="lgi"><span class="lgline" style="background:${f.status==='red'?'#fb7185':f.status==='yellow'?'#fbbf24':'#34d399'}"></span>After purchase</span>
+    <span class="lgi"><span class="lgline" style="background:${v.status==='red'?'#fb7185':v.status==='yellow'?'#fbbf24':'#34d399'}"></span>After purchase</span>
   </div>
   <div class="fmla">
     <div class="fmlt">Formula breakdown</div>
-    ${$0(C.bal)} − ${$0(f.cost)} − ${$0(C.p90)} = <b style="color:${f.ac<0?'var(--red)':f.ac<C.sb?'var(--amb)':'var(--grn)'}">${$0(f.ac)}</b><br>
+    min projected bal = <b style="color:${VS[v.status].c}">${$0(v.minPost)}</b> (${minLabel}) vs SB<br>
     SB = exp × 3 = ${$0(C.fcExp)} × 3 = <b>${$0(C.sb)}</b><br>
-    Recovery = cost ÷ surplus = ${$0(f.cost)} ÷ ${$0(surplus)}${recovMo?` ≈ <b>${recovMo} mo</b>`:''}
+    Recovery = cost ÷ surplus = ${$0(fc)} ÷ ${$0(surplus)}${recovMo?` ≈ <b>${recovMo} mo</b>`:''}
+  </div>
+  <div class="row" style="gap:8px;margin-top:13px">
+    <input class="finp" id="wl-name" placeholder="Name this purchase..." style="flex:1">
+    <button class="tbn primary" style="flex:none;padding:12px 14px" onclick="addWish()">+ Wishlist</button>
   </div>`;
 }
 
@@ -597,15 +634,47 @@ function fcInput(v) {
 }
 
 function vForecast(C) {
+  const wl = (() => {
+    if (!S.wishlist.length) return '';
+    const { base, labels } = projBase(C);
+    return `<div class="card">
+      <div class="ct" style="margin-bottom:4px">Wishlist</div>
+      <div class="cs" style="margin-bottom:12px">Saved purchases, re-judged live against your current projection. Tap one to load it into the simulator.</div>
+      ${S.wishlist.map(w => {
+        const v = purchaseVerdict(C, base, w.cost, w.mode, 0);
+        const from = v && v.status !== 'green' ? affordableFrom(C, base, labels, w.cost, w.mode) : null;
+        const chip = !v ? {t:'—', c:'var(--tx3)', bd:'var(--bd)'}
+          : v.status === 'green' ? {t:'SAFE', c:'var(--grn)', bd:'rgba(52,211,153,.45)'}
+          : from && from.k > 0 ? {t:'FROM ' + from.label.toUpperCase(), c:'var(--amb)', bd:'rgba(251,191,36,.45)'}
+          : {t:'UNSAFE', c:'var(--red)', bd:'rgba(251,113,133,.45)'};
+        return `<div class="txi" style="cursor:pointer" onclick="loadWish(${w.id})">
+          <div class="row">
+            <div style="min-width:0">
+              <div class="txn">${esc(w.name)}</div>
+              <div class="txs">${$0(w.cost)} <span class="pill ${w.mode==='credit'?'pk':'pc'}">${w.mode.toUpperCase()}</span></div>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px">
+              <span class="pill" style="color:${chip.c};border:1px solid ${chip.bd};background:transparent;padding:4px 9px">${chip.t}</span>
+              <button class="tbn danger" style="flex:none;padding:4px 10px" onclick="event.stopPropagation();delWish(${w.id})">×</button>
+            </div>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>`;
+  })();
   return `
   <div class="pg">
     <div class="card">
       <div class="ct" style="font-size:15px">Can I afford this?</div>
-      <div class="cs" style="margin-bottom:13px">Checks the purchase against your balance, pending credit, 3-month safety buffer, the 50/30/20 guideline, and your cash flow recovery rate.</div>
+      <div class="cs" style="margin-bottom:13px">Judged on your real 12-month projection: per-period incomes, pending credit clearances, the 3-month buffer, the 50/30/20 guideline, and your recovery rate.</div>
       <div class="fbig"><label class="flab" style="text-align:center">Purchase amount (€)</label>
         <input class="fbiginp" type="number" inputmode="decimal" min="0" placeholder="0" value="${S.forecastAmt}" oninput="fcInput(this.value)"></div>
+      <div class="fg"><div class="seg">
+        <button class="segb ${S.fcMode==='cash'?'a':''}" onclick="S.fcMode='cash';render()">Cash &middot; hits now</button>
+        <button class="segb ${S.fcMode==='credit'?'a':''}" onclick="S.fcMode='credit';render()">Credit &middot; 3-mo lag</button>
+      </div></div>
       <div class="cg3">
-        <div class="ccrd"><div class="ccl">Balance</div><div class="ccv" style="color:#a5b4fc">${$0(C.bal)}</div></div>
+        <div class="ccrd"><div class="ccl">Balance</div><div class="ccv" style="color:#7fc4ff">${$0(C.bal)}</div></div>
         <div class="ccrd"><div class="ccl">Pending 90d</div><div class="ccv" style="color:var(--amb)">${$0(C.p90)}</div></div>
         <div class="ccrd"><div class="ccl">Buffer SB</div><div class="ccv" style="color:var(--tx3)">${$0(C.sb)}</div></div>
       </div>
@@ -626,6 +695,7 @@ function vForecast(C) {
       </div>
       <div id="fcres">${fcResults(C)}</div>
     </div>
+    ${wl}
   </div>`;
 }
 
@@ -850,6 +920,16 @@ function addGoal(){
   if (!name || !target || target<=0) { toast('Name and target required'); return; }
   S.goals.push({ name, target }); save(); render(); toast('Goal added');
 }
+function addWish(){
+  const name = document.getElementById('wl-name')?.value.trim();
+  const cost = parseFloat(S.forecastAmt);
+  if (!name) { toast('Name the purchase first'); return; }
+  if (!(cost > 0)) { toast('Simulate an amount first'); return; }
+  S.wishlist.push({ id: Date.now(), name, cost, mode: S.fcMode });
+  save(); render(); toast('Saved to wishlist');
+}
+function delWish(id){ S.wishlist = S.wishlist.filter(w=>w.id!==id); save(); render(); toast('Removed'); }
+function loadWish(id){ const w = S.wishlist.find(x=>x.id===id); if(!w) return; S.forecastAmt = String(w.cost); S.fcMode = w.mode; render(); toast('Loaded into simulator'); }
 function download(name, content, mime){
   const blob = new Blob([content], { type: mime });
   const a = document.createElement('a');
@@ -866,7 +946,7 @@ function exportCSV(){
 }
 function exportJSON(){
   S.set.lastBackup = isoOf(TODAY); save();
-  download('fintrack-backup.json', JSON.stringify({ set:S.set, txs:S.txs, recurring:S.recurring, goals:S.goals }, null, 2), 'application/json');
+  download('fintrack-backup.json', JSON.stringify({ set:S.set, txs:S.txs, recurring:S.recurring, goals:S.goals, wishlist:S.wishlist }, null, 2), 'application/json');
   render(); toast('Backup saved');
 }
 function importJSON(inp){
@@ -877,7 +957,7 @@ function importJSON(inp){
       const p = JSON.parse(r.result);
       if (!p.set || !Array.isArray(p.txs)) throw 0;
       S.set = { ...DEFAULTS.set, ...p.set };
-      S.txs = p.txs; S.recurring = p.recurring||[]; S.goals = p.goals||[];
+      S.txs = p.txs; S.recurring = p.recurring||[]; S.goals = p.goals||[]; S.wishlist = p.wishlist||[];
       save(); render(); toast('Backup restored');
     } catch(e){ toast('Invalid backup file'); }
   };
