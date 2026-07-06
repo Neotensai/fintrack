@@ -19,7 +19,7 @@ function dnum(d){ return d.getFullYear()*10000 + d.getMonth()*100 + d.getDate();
 
 const DEFAULTS = {
   set: { startBal: 30000, startDate: isoOf(TODAY), income: 4500, incomeByMonth: {},
-         saveTarget: 500, saveByMonth: {}, fcIncome: '', fcExp: '', budgets: {}, hideBal: false },
+         saveTarget: 500, saveByMonth: {}, fcIncome: '', fcExp: '', budgets: {}, hideBal: false, lastBackup: '' },
   txs: [],
   recurring: [],
   goals: [],
@@ -113,6 +113,16 @@ function maskSm(s){ return S.set.hideBal ? '€••••' : s; }
 const EYE_ON = '<svg viewBox="0 0 24 24" style="width:18px;height:18px;stroke:#fff;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
 const EYE_OFF = '<svg viewBox="0 0 24 24" style="width:18px;height:18px;stroke:#fff;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
 function toggleBal(){ S.set.hideBal = !S.set.hideBal; save(); render(); }
+
+/* ---------- durability ---------- */
+let PERSISTED = null; // null unknown, true granted, false best-effort
+function backupInfo(pStart) {
+  if (!S.set.lastBackup) return { fresh: false, label: 'never' };
+  const lb = new Date(S.set.lastBackup + 'T12:00:00');
+  const days = Math.max(0, Math.round((TODAY - lb) / 86400000));
+  const fresh = dnum(lb) >= dnum(pStart); // backed up within the current pay period
+  return { fresh, label: days === 0 ? 'today' : days === 1 ? 'yesterday' : days + ' days ago' };
+}
 function sd(s){ return new Date(s+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}); }
 function sdD(d){ return d.toLocaleDateString('en-US',{month:'short',day:'numeric'}); }
 function ld(d){ return d.toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'}); }
@@ -417,6 +427,16 @@ function vHome(C) {
       <div class="ks" style="margin-top:7px;color:${paceColor}">${paceMsg}</div>
     </div>
 
+    ${(() => {
+      const bi = backupInfo(C.pStart);
+      return bi.fresh ? '' : `<div class="kpi sm" style="margin-bottom:11px;border-color:rgba(251,191,36,.4);background:rgba(251,191,36,.05)">
+      <div class="row" style="gap:10px">
+        <div><div class="kl" style="color:var(--amb)">Backup reminder</div>
+        <div class="ks" style="margin-top:4px">Last backup: <b style="color:var(--amb)">${bi.label}</b>. Your data lives only on this phone — save a copy each period.</div></div>
+        <button class="chip" style="flex-shrink:0;border-color:rgba(251,191,36,.4);background:rgba(251,191,36,.12);color:var(--amb)" onclick="exportJSON()">Back up now</button>
+      </div>
+    </div>`;
+    })()}
     <div class="sec-h"><div class="sec-t">Current period ledger</div>
       <button class="chip" onclick="S.tab='add';render()">+ Add</button></div>
     ${C.pTxs.length === 0
@@ -660,8 +680,11 @@ function vSettings(C) {
         <div><div class="set-l">Export transactions (CSV)</div><div class="set-s">Open in Excel or Google Sheets</div></div>
         <span style="color:var(--tx3)">&rsaquo;</span></div>
       <div class="set-row" onclick="exportJSON()" style="cursor:pointer">
-        <div><div class="set-l">Backup everything (JSON)</div><div class="set-s">Settings, transactions, goals, recurring</div></div>
+        <div><div class="set-l">Backup everything (JSON)</div><div class="set-s">Last backup: ${S.set.lastBackup ? sd(S.set.lastBackup) : 'never'} &middot; settings, transactions, goals, recurring</div></div>
         <span style="color:var(--tx3)">&rsaquo;</span></div>
+      <div class="set-row">
+        <div><div class="set-l">Storage protection</div><div class="set-s">${PERSISTED===true?'Granted — the browser will not auto-clear this app\'s data':PERSISTED===false?'Best effort — the browser may clear data under storage pressure; back up regularly':'Checking…'}</div></div>
+        <span style="font-size:15px">${PERSISTED===true?'🔒':PERSISTED===false?'⚠️':'…'}</span></div>
       <div class="set-row" style="cursor:pointer">
         <div onclick="document.getElementById('imp').click()"><div class="set-l">Restore from backup</div><div class="set-s">Import a previously exported JSON file</div></div>
         <input type="file" id="imp" accept=".json" style="display:none" onchange="importJSON(this)">
@@ -842,8 +865,9 @@ function exportCSV(){
   toast('CSV exported');
 }
 function exportJSON(){
+  S.set.lastBackup = isoOf(TODAY); save();
   download('fintrack-backup.json', JSON.stringify({ set:S.set, txs:S.txs, recurring:S.recurring, goals:S.goals }, null, 2), 'application/json');
-  toast('Backup saved');
+  render(); toast('Backup saved');
 }
 function importJSON(inp){
   const file = inp.files?.[0]; if (!file) return;
@@ -893,6 +917,12 @@ function render() {
 
 postRecurring();
 render();
+// ask the browser to shield this origin's storage from automatic cleanup
+if (typeof navigator !== 'undefined' && navigator.storage && navigator.storage.persist) {
+  navigator.storage.persisted().then(p => p ? true : navigator.storage.persist())
+    .then(granted => { PERSISTED = !!granted; if (S.tab === 'settings') render(); })
+    .catch(() => { PERSISTED = false; });
+}
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   navigator.serviceWorker.register('sw.js').catch(()=>{});
 }
