@@ -288,7 +288,7 @@ function svgYearChart(C) {
     line += (i ? 'L' : 'M') + (x + bw/2).toFixed(1) + ',' + ly.toFixed(1) + ' ';
   });
   return `<svg class="svgline" viewBox="0 0 ${W} ${H}" role="img" aria-label="Income and expenses per pay period for ${YEAR} with balance trend line">
-    ${bars}<path d="${line}" stroke="#8b5cf6" stroke-width="2" fill="none" stroke-linecap="round"/></svg>`;
+    ${bars}<path d="${line}" stroke="#00a8ff" stroke-width="2" fill="none" stroke-linecap="round"/></svg>`;
 }
 
 function svgProjection(C, forecast) {
@@ -322,7 +322,7 @@ function svgProjection(C, forecast) {
     <line x1="8" y1="${Y(C.sb).toFixed(1)}" x2="${W-8}" y2="${Y(C.sb).toFixed(1)}" stroke="#5d6b84" stroke-width="1" stroke-dasharray="3,3"/>
     <text x="${W-10}" y="${(Y(C.sb)-4).toFixed(1)}" font-size="8" fill="#5d6b84" text-anchor="end" font-weight="700">buffer ${$0(C.sb)}</text>
     <line x1="8" y1="${Y(0).toFixed(1)}" x2="${W-8}" y2="${Y(0).toFixed(1)}" stroke="rgba(148,163,184,.25)" stroke-width="1"/>
-    <path d="${path(base)}" stroke="#8b5cf6" stroke-width="2" fill="none" stroke-linecap="round"/>
+    <path d="${path(base)}" stroke="#00a8ff" stroke-width="2" fill="none" stroke-linecap="round"/>
     <path d="${path(post)}" stroke="${sc}" stroke-width="2" fill="none" stroke-dasharray="5,3" stroke-linecap="round"/>
     ${lbls}</svg>`;
 }
@@ -471,7 +471,7 @@ function vYear(C) {
       <div class="lgnd">
         <span class="lgi"><span class="lgbox" style="background:rgba(52,211,153,.8)"></span>Income</span>
         <span class="lgi"><span class="lgbox" style="background:rgba(251,113,133,.75)"></span>Expenses</span>
-        <span class="lgi"><span class="lgline" style="background:#8b5cf6"></span>Balance</span>
+        <span class="lgi"><span class="lgline" style="background:#00a8ff"></span>Balance</span>
       </div>
     </div>
     ${C.ydata.map(md => {
@@ -572,14 +572,14 @@ function fcResults(C) {
     <div class="ccrd"><div class="ccl">Recovery</div><div class="ccv" style="color:${recovMo?VS[f.status].c:'var(--red)'}">${recovMo?recovMo+' mo':'never'}</div></div>
     <div class="ccrd"><div class="ccl">Recovered by</div><div class="ccv" style="font-size:11.5px;color:var(--tx2)">${recovDate?recovDate.toLocaleDateString('en-US',{month:'short',year:'numeric'}):'—'}</div></div>
   </div>
-  <div class="cn" style="background:rgba(139,92,246,.06);border-color:rgba(139,92,246,.3)">
+  <div class="cn" style="background:rgba(0,168,255,.06);border-color:rgba(0,168,255,.3)">
     <b>50/30/20 check:</b> with ${$0(C.fcIncome)} income, your guideline discretionary (wants) budget is ${$0(disc)}/mo.
     This purchase equals <b>${discMonths.toFixed(1)} month${discMonths>=1.95?'s':''}</b> of that allowance${discMonths>3?' — consider spreading or delaying it':''}.
   </div>
   <div class="fmlt">12-month projection</div>
   ${svgProjection(C, f)}
   <div class="lgnd" style="margin-bottom:13px">
-    <span class="lgi"><span class="lgline" style="background:#8b5cf6"></span>Without purchase</span>
+    <span class="lgi"><span class="lgline" style="background:#00a8ff"></span>Without purchase</span>
     <span class="lgi"><span class="lgline" style="background:${f.status==='red'?'#fb7185':f.status==='yellow'?'#fbbf24':'#34d399'}"></span>After purchase</span>
   </div>
   <div class="fmla">
