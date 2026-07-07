@@ -19,7 +19,7 @@ function dnum(d){ return d.getFullYear()*10000 + d.getMonth()*100 + d.getDate();
 
 const DEFAULTS = {
   set: { startBal: 30000, startDate: isoOf(TODAY), income: 4500, incomeByMonth: {},
-         saveTarget: 500, saveByMonth: {}, fcIncome: '', fcExp: '', budgets: {}, hideBal: false, lastBackup: '' },
+         saveTarget: 500, saveByMonth: {}, fcIncome: '', fcExp: '', sbOverride: '', budgets: {}, hideBal: false, lastBackup: '' },
   txs: [],
   recurring: [],
   goals: [],
@@ -204,7 +204,8 @@ function compute() {
   const avgInc12 = inc12 / 12;
   const fcIncome = (S.set.fcIncome !== '' && S.set.fcIncome != null && +S.set.fcIncome > 0) ? +S.set.fcIncome : avgInc12;
   const fcExp = (S.set.fcExp !== '' && S.set.fcExp != null && +S.set.fcExp > 0) ? +S.set.fcExp : avgExpHist;
-  const sb = fcExp * 3;
+  const sbManual = (S.set.sbOverride !== '' && S.set.sbOverride != null && +S.set.sbOverride > 0);
+  const sb = sbManual ? +S.set.sbOverride : fcExp * 3;
 
   const pStart = adjustedPayday(cur.y, cur.m);
   const pEnd = nextPaydayAfter(cur.y, cur.m);
@@ -216,6 +217,7 @@ function compute() {
   const mCredit = pTxs.filter(t=>t.type==='expense' && t.pm==='credit').reduce((s,t)=>s+t.amt,0);
   const mNet = mInc - mCash;
   const mCommitted = mCash + mCredit;
+  const remainingExp = Math.max(0, fcExp - mCommitted); // expected spend still to come before next payday
 
   const totalDays = Math.max(1, Math.round((pEnd - pStart)/86400000));
   const elapsedDays = Math.max(0, Math.min(totalDays, Math.round((nowNoon - pStart)/86400000)));
@@ -265,7 +267,7 @@ function compute() {
     ydata.push({ m, start, end, mt, ti, ce, cc, cp, net, endBal, tgt, saved, isCur, isFut });
   }
 
-  return { bal, cur, pStart, pEnd, pend, p90, ptot, pGroups, avgExpHist, avgInc12, fcIncome, fcExp, sb,
+  return { bal, cur, pStart, pEnd, pend, p90, ptot, pGroups, avgExpHist, avgInc12, fcIncome, fcExp, sb, sbManual, remainingExp,
            daysToNext, prog, a27, payNext, pTxs, mInc, mCash, mCredit, mNet, mCommitted,
            pace, periodPct, spendPct, totalDays, elapsedDays,
            sTarget, allowedSpend, projSave, savePct, saveStatus, catSpend, ydata };
@@ -322,6 +324,12 @@ function purchaseVerdict(C, base, cost, mode, buyK) {
   const post = base.map((v,i) => i >= hitK ? v - cost : v);
   let minPost = Infinity, minIdx = hitK;
   for (let i = hitK; i < post.length; i++) if (post[i] < minPost) { minPost = post[i]; minIdx = i; }
+  if (hitK === 0) {
+    // the real low point of buying now: today's balance minus the purchase
+    // minus what you're still expected to spend before the next payday
+    const trough = base[0] - C.remainingExp - cost;
+    if (trough < minPost) { minPost = trough; minIdx = -1; }
+  }
   const gap = minPost - C.sb;
   const status = minPost < 0 ? 'red' : gap < 0 ? 'yellow' : 'green';
   return { post, minPost, minIdx, gap, status, hitK, lag };
@@ -578,13 +586,23 @@ function fcResults(C) {
     red:{c:'var(--red)',bg:'rgba(251,113,133,.07)',bd:'rgba(251,113,133,.35)',label:'NOT RECOMMENDED'},
   };
   const from = v.status === 'green' ? null : affordableFrom(C, base, labels, fc, S.fcMode);
-  const minLabel = v.minIdx === 0 ? 'this month' : 'in ' + labels[v.minIdx];
+  const minLabel = v.minIdx === -1 ? 'just before the next payday' : v.minIdx === 0 ? 'this month' : 'in ' + labels[v.minIdx];
   const hitTxt = S.fcMode === 'credit' ? `the charge lands on the ${labels[v.hitK]} payday` : 'the charge hits immediately';
   const surplus = C.fcIncome - C.fcExp;
   const recovMo = surplus > 0 ? Math.ceil(fc / surplus) : null;
   const recovDate = recovMo ? new Date(TODAY.getFullYear(), TODAY.getMonth()+recovMo, 1) : null;
   const disc = C.fcIncome * 0.30;
   const discMonths = disc > 0 ? fc / disc : 0;
+  // period plan lens: commitment counts NOW in both modes (credit cash just leaves later)
+  const planAfter = C.projSave - fc;
+  const plan = planAfter >= C.sTarget
+    ? { c:'var(--grn)', bd:'rgba(52,211,153,.35)', bg:'rgba(52,211,153,.05)',
+        msg:`<b>This period's plan:</b> projected savings ${$0(C.projSave)} → ${$0(planAfter)}, still above your ${$0(C.sTarget)} target.` }
+    : planAfter >= 0
+    ? { c:'var(--amb)', bd:'rgba(251,191,36,.35)', bg:'rgba(251,191,36,.05)',
+        msg:`<b>Plan warning:</b> projected savings drop ${$0(C.projSave)} → ${$0(planAfter)}, missing this period's ${$0(C.sTarget)} target by ${$0(C.sTarget - planAfter)}${S.fcMode==='credit' ? ' (committed now, even though the cash leaves in 3 months)' : ''}.` }
+    : { c:'var(--red)', bd:'rgba(251,113,133,.35)', bg:'rgba(251,113,133,.05)',
+        msg:`<b>Plan broken:</b> this purchase exceeds everything this period can give — projected savings go negative (${$0(planAfter)}).` };
   return `
   <div class="verd" style="background:${VS[v.status].bg};border:2px solid ${VS[v.status].bd}">
     <div class="vt" style="color:${VS[v.status].c}">${VS[v.status].label}</div>
@@ -594,6 +612,7 @@ function fcResults(C) {
       : `This drives your projected balance to ${$$(v.minPost)} ${minLabel}. ${from && from.k>0 ? `Delay it: <b style="color:var(--amb)">affordable from ${from.label}</b>.` : 'Not affordable within the next year at current cash flow.'}`
     }</div>
   </div>
+  <div class="cn" style="background:${plan.bg};border-color:${plan.bd};color:var(--tx2)">${plan.msg}</div>
   ${v.status!=='green' && from ? `<div class="cg3" style="margin-bottom:13px">
     <div class="ccrd" style="border-color:rgba(52,211,153,.4)"><div class="ccl">Affordable from</div><div class="ccv" style="color:var(--grn)">${from.label.toUpperCase()}</div></div>
     <div class="ccrd"><div class="ccl">Hit lands</div><div class="ccv" style="color:var(--tx2)">${labels[v.hitK]==='Now'?'NOW':labels[v.hitK].toUpperCase()}</div></div>
@@ -618,7 +637,7 @@ function fcResults(C) {
   <div class="fmla">
     <div class="fmlt">Formula breakdown</div>
     min projected bal = <b style="color:${VS[v.status].c}">${$0(v.minPost)}</b> (${minLabel}) vs SB<br>
-    SB = exp × 3 = ${$0(C.fcExp)} × 3 = <b>${$0(C.sb)}</b><br>
+    SB = ${C.sbManual ? 'manual override' : 'exp × 3 = ' + $0(C.fcExp) + ' × 3'} = <b>${$0(C.sb)}</b><br>
     Recovery = cost ÷ surplus = ${$0(fc)} ÷ ${$0(surplus)}${recovMo?` ≈ <b>${recovMo} mo</b>`:''}
   </div>
   <div class="row" style="gap:8px;margin-top:13px">
@@ -676,7 +695,7 @@ function vForecast(C) {
       <div class="cg3">
         <div class="ccrd"><div class="ccl">Balance</div><div class="ccv" style="color:#7fc4ff">${$0(C.bal)}</div></div>
         <div class="ccrd"><div class="ccl">Pending 90d</div><div class="ccv" style="color:var(--amb)">${$0(C.p90)}</div></div>
-        <div class="ccrd"><div class="ccl">Buffer SB</div><div class="ccv" style="color:var(--tx3)">${$0(C.sb)}</div></div>
+        <div class="ccrd"><div class="ccl">Buffer SB &middot; ${C.sbManual?'manual':'auto'}</div><div class="ccv" style="color:var(--tx3)">${$0(C.sb)}</div></div>
       </div>
       <div class="fmlt" style="margin-top:2px">Model inputs — edit to match your situation</div>
       <div class="fg2" style="margin-bottom:13px">
@@ -723,6 +742,10 @@ function vSettings(C) {
       <div class="set-row" onclick="S.subview='savings';render()" style="cursor:pointer">
         <div><div class="set-l">Savings target by period</div><div class="set-s">Set a different target per period</div></div>
         <span style="color:var(--tx3)">&rsaquo;</span></div>
+      <div class="set-row">
+        <div><div class="set-l">Safety buffer</div><div class="set-s">Untouchable cushion for the forecast verdict. Blank = auto: 3 × avg expenses (${$0(C.fcExp*3)})</div></div>
+        <input class="set-inp" type="number" inputmode="decimal" placeholder="${Math.round(C.fcExp*3)}" value="${S.set.sbOverride}" onchange="S.set.sbOverride=this.value;save();render()">
+      </div>
       <div class="set-row">
         <div><div class="set-l">Balance</div><div class="set-s">Your liquidity on the date below</div></div>
         <input class="set-inp" type="number" inputmode="decimal" value="${S.set.startBal}" onchange="S.set.startBal=+this.value||0;save();render()">
