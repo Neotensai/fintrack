@@ -31,6 +31,7 @@ S.tab = 'home';
 S.editId = null;
 S.forecastAmt = '';
 S.fcMode = 'cash';
+S.catScope = 'period';
 S.subview = null;
 S.form = blankForm();
 
@@ -267,7 +268,37 @@ function compute() {
     ydata.push({ m, start, end, mt, ti, ce, cc, cp, net, endBal, tgt, saved, isCur, isFut });
   }
 
+  // honest-future pass: projected spend, net, and chained end balance
+  const sd0d = dnum(new Date(S.set.startDate + 'T12:00:00'));
+  let run = null;
+  for (const md of ydata) {
+    md.preStart = dnum(md.end) <= sd0d;               // period ended before tracking began
+    md.heavy = md.isFut && md.cc >= 0.3 * Math.max(1, md.ti); // big clearance ahead
+    if (!md.isFut) {
+      md.pSpend = md.ce + md.cp;
+      md.projNet = md.net;
+      md.projEnd = md.isCur ? md.endBal - remainingExp : md.endBal;
+    } else {
+      md.pSpend = Math.max(fcExp, md.ce + md.cp);     // avg spend, unless known txs exceed it
+      md.projNet = md.ti - md.pSpend - md.cc;
+      md.projEnd = (run !== null ? run : bal) + md.projNet;
+    }
+    run = md.projEnd;
+  }
+
+  // category lens: previous period and full-year maps
+  const prevM = cur.m === 0 ? 11 : cur.m - 1, prevY = cur.m === 0 ? cur.y - 1 : cur.y;
+  const catPrev = {};
+  for (const t of txs) if (t.type === 'expense' && inPeriod(t.date, prevY, prevM)) catPrev[t.cat] = (catPrev[t.cat]||0) + t.amt;
+  const catYear = {};
+  for (const md of ydata) for (const t of md.mt) if (t.type === 'expense') catYear[t.cat] = (catYear[t.cat]||0) + t.amt;
+
+  // savings vs plan, year to date (periods since tracking began, current one projected)
+  let ytdSaved = 0, ytdPlan = 0;
+  for (const md of ydata) if (!md.isFut && !md.preStart) { ytdSaved += md.isCur ? projSave : md.saved; ytdPlan += md.tgt; }
+
   return { bal, cur, pStart, pEnd, pend, p90, ptot, pGroups, avgExpHist, avgInc12, fcIncome, fcExp, sb, sbManual, remainingExp,
+           catPrev, catYear, ytdSaved, ytdPlan,
            daysToNext, prog, a27, payNext, pTxs, mInc, mCash, mCredit, mNet, mCommitted,
            pace, periodPct, spendPct, totalDays, elapsedDays,
            sTarget, allowedSpend, projSave, savePct, saveStatus, catSpend, ydata };
@@ -276,19 +307,19 @@ function compute() {
 /* ---------- SVG charts ---------- */
 function svgYearChart(C) {
   const W = 340, H = 150, padL = 6, padB = 16;
-  const maxV = Math.max(1, ...C.ydata.map(d => Math.max(d.ti, d.ce + d.cc)));
-  const bals = C.ydata.map(d => d.endBal);
+  const maxV = Math.max(1, ...C.ydata.map(d => Math.max(d.ti, d.pSpend + d.cc)));
+  const bals = C.ydata.map(d => d.projEnd);
   const minB = Math.min(...bals, 0), maxB = Math.max(...bals, 1);
   const bw = (W - padL*2) / 12;
   let bars = '', line = '';
   C.ydata.forEach((d, i) => {
     const x = padL + i * bw;
     const hI = Math.max(2, (d.ti / maxV) * (H - padB - 8));
-    const hE = Math.max(2, ((d.ce + d.cc) / maxV) * (H - padB - 8));
+    const hE = Math.max(2, ((d.pSpend + d.cc) / maxV) * (H - padB - 8));
     bars += `<rect x="${(x+2).toFixed(1)}" y="${(H-padB-hI).toFixed(1)}" width="${(bw/2-3).toFixed(1)}" height="${hI.toFixed(1)}" rx="2" fill="rgba(52,211,153,.8)"/>`;
     bars += `<rect x="${(x+bw/2+1).toFixed(1)}" y="${(H-padB-hE).toFixed(1)}" width="${(bw/2-3).toFixed(1)}" height="${hE.toFixed(1)}" rx="2" fill="rgba(251,113,133,.75)"/>`;
     bars += `<text x="${(x+bw/2).toFixed(1)}" y="${H-3}" font-size="8" fill="#5d6b84" text-anchor="middle" font-weight="700">${MS[i]}</text>`;
-    const ly = 8 + (1 - (d.endBal - minB) / (maxB - minB || 1)) * (H - padB - 16);
+    const ly = 8 + (1 - (d.projEnd - minB) / (maxB - minB || 1)) * (H - padB - 16);
     line += (i ? 'L' : 'M') + (x + bw/2).toFixed(1) + ',' + ly.toFixed(1) + ' ';
   });
   return `<svg class="svgline" viewBox="0 0 ${W} ${H}" role="img" aria-label="Income and expenses per pay period for ${YEAR} with balance trend line">
@@ -507,23 +538,66 @@ function vYear(C) {
         <span class="lgi"><span class="lgline" style="background:#00a8ff"></span>Balance</span>
       </div>
     </div>
+    ${(() => {
+      if (!C.ytdPlan && !C.ytdSaved) return '';
+      const pct = C.ytdPlan > 0 ? Math.max(0, Math.min(100, (C.ytdSaved / C.ytdPlan) * 100)) : 0;
+      const diff = C.ytdSaved - C.ytdPlan;
+      const col = diff >= 0 ? 'var(--grn)' : C.ytdSaved >= 0 ? 'var(--amb)' : 'var(--red)';
+      return `<div class="card">
+      <div class="row"><div class="ct">Savings vs plan &middot; YTD</div>
+        <div style="font-size:12px;font-weight:800;color:${col}">${diff>=0?'+':''}${$0(diff)}</div></div>
+      <div class="cs" style="margin:4px 0 10px">Saved ${$0(C.ytdSaved)} of ${$0(C.ytdPlan)} planned so far (current period projected).</div>
+      <div class="gauge" style="height:8px"><div class="gfill" style="width:${pct.toFixed(1)}%;background:${col}"></div></div>
+      <div class="ks" style="margin-top:6px;color:${col}">${diff>=0?'Ahead of plan — the year is winning.':'Behind plan by '+$0(Math.abs(diff))+' — the remaining periods must carry it.'}</div>
+    </div>`;
+    })()}
+    ${(() => {
+      const src2 = S.catScope === 'year' ? C.catYear : C.catSpend;
+      const keys = [...new Set([...Object.keys(src2), ...(S.catScope==='period'?Object.keys(C.catPrev):[])])]
+        .filter(k => (src2[k]||0) > 0 || (S.catScope==='period' && (C.catPrev[k]||0) > 0))
+        .sort((a,b)=>(src2[b]||0)-(src2[a]||0)).slice(0,6);
+      if (!keys.length) return '';
+      const mx = Math.max(1, ...keys.map(k=>src2[k]||0));
+      const tot = Object.values(src2).reduce((a,b)=>a+b,0);
+      return `<div class="card">
+      <div class="row" style="margin-bottom:10px"><div class="ct">Where it goes</div>
+        <div class="seg" style="width:170px"><button class="segb ${S.catScope==='period'?'a':''}" style="padding:6px" onclick="event.stopPropagation();S.catScope='period';render()">Period</button><button class="segb ${S.catScope==='year'?'a':''}" style="padding:6px" onclick="event.stopPropagation();S.catScope='year';render()">Year</button></div></div>
+      ${keys.map(k => {
+        const v = src2[k]||0, prev = C.catPrev[k]||0;
+        let delta = '';
+        if (S.catScope === 'period') {
+          if (prev > 0 && v !== prev) { const p = Math.round(((v-prev)/prev)*100); delta = `<span style="color:${p>0?'var(--red)':'var(--grn)'};font-weight:700">${p>0?'▲ +':'▼ '}${p}%</span>`; }
+          else if (prev === 0 && v > 0) delta = `<span style="color:var(--tx3);font-weight:700">new</span>`;
+          else if (prev > 0 && v === prev) delta = `<span style="color:var(--tx3);font-weight:700">=</span>`;
+        } else if (tot > 0) delta = `<span style="color:var(--tx3);font-weight:700">${Math.round((v/tot)*100)}%</span>`;
+        return `<div class="cb" style="margin-bottom:9px">
+          <div class="cbl" style="margin-bottom:4px">
+            <span style="font-weight:600;display:flex;align-items:center;gap:7px;font-size:12px"><span style="width:7px;height:7px;background:${CC[k]||'#64748b'};display:inline-block;transform:rotate(45deg)"></span>${k}</span>
+            <span style="display:flex;gap:9px;align-items:center;font-size:11px"><span style="color:var(--tx2);font-weight:700">${$0(v)}</span>${delta}</span></div>
+          <div class="gauge" style="height:5px"><div class="gfill" style="width:${((v/mx)*100).toFixed(1)}%;background:${CC[k]||'#64748b'};height:5px"></div></div>
+        </div>`;
+      }).join('')}
+      ${S.catScope==='period' ? `<div class="ks" style="margin-top:4px">vs previous period (${sdD(adjustedPayday(C.cur.m===0?C.cur.y-1:C.cur.y, C.cur.m===0?11:C.cur.m-1))} → ${sdD(C.pStart)})</div>` : ''}
+    </div>`;
+    })()}
     ${C.ydata.map(md => {
       const sPct = md.tgt > 0 ? Math.max(0, Math.min(100, (md.saved/md.tgt)*100)) : 0;
       const sCol = md.saved >= md.tgt ? 'var(--grn)' : md.saved >= md.tgt*0.5 ? 'var(--amb)' : 'var(--red)';
       return `
-    <div class="mc ${md.isCur?'cur':''}" ${md.isFut?'style="opacity:.72"':''} onclick="toggleM(${md.m})">
+    <div class="mc ${md.isCur?'cur':''}" ${md.isFut?'style="opacity:.72"':md.preStart?'style="opacity:.45"':''} onclick="toggleM(${md.m})">
       <div class="row">
         <div class="mn">${ML[md.m]}
           ${md.isCur?`<span class="mtag" style="background:var(--ind);color:#fff">NOW</span>`:''}
-          ${md.isFut?`<span class="mtag" style="color:var(--tx3);border:1px solid var(--bd)">projected</span>`:''}</div>
-        <div style="font-size:15px;font-weight:800;color:${md.net>=0?'var(--grn)':'var(--red)'}">${md.net>=0?'+':''}${$0(md.net)}</div>
+          ${md.isFut?`<span class="mtag" style="color:var(--tx3);border:1px solid var(--bd)">projected</span>`:''}
+          ${md.heavy?`<span class="mtag" style="color:var(--amb);border:1px solid rgba(251,191,36,.45)">CLEARANCE HIT</span>`:''}</div>
+        <div style="font-size:15px;font-weight:800;color:${md.projNet>=0?'var(--grn)':'var(--red)'}">${md.isFut?'~':''}${md.projNet>=0?'+':''}${$0(md.projNet)}</div>
       </div>
       <div class="ks" style="margin-top:2px;color:var(--tx3)">${sdD(md.start)} → ${sdD(md.end)}</div>
       <div class="row" style="margin-top:7px;font-size:11px;color:var(--tx3)">
-        <span>In <b style="color:var(--grn)">${$0(md.ti)}</b> &middot; Cash <b style="color:${md.ce>0?'var(--red)':'var(--tx3)'}">${$0(md.ce)}</b>${md.cp>0?` &middot; Card <b style="color:var(--amb)">${$0(md.cp)}</b>`:''}${md.cc>0?` &middot; Clears <b style="color:var(--amb)">${$0(md.cc)}</b>`:''}</span>
-        <span>End: <b style="color:${md.endBal>=0?'var(--tx)':'var(--red)'}">${$0(md.endBal)}</b></span>
+        <span>In <b style="color:var(--grn)">${$0(md.ti)}</b> &middot; ${md.isFut?`Est. spend <b style="color:var(--red)">${$0(md.pSpend)}</b>`:`Cash <b style="color:${md.ce>0?'var(--red)':'var(--tx3)'}">${$0(md.ce)}</b>`}${md.cp>0&&!md.isFut?` &middot; Card <b style="color:var(--amb)">${$0(md.cp)}</b>`:''}${md.cc>0?` &middot; Clears <b style="color:var(--amb)">${$0(md.cc)}</b>`:''}</span>
+        <span>End: <b style="color:${md.projEnd>=0?'var(--tx)':'var(--red)'}">${(md.isFut||md.isCur)?'~':''}${$0(md.projEnd)}</b></span>
       </div>
-      ${md.tgt>0 && !md.isFut ? `<div style="margin-top:8px">
+      ${md.tgt>0 && !md.isFut && !md.preStart ? `<div style="margin-top:8px">
         <div class="row" style="font-size:10px;color:var(--tx3);margin-bottom:4px"><span>Saved ${$0(Math.max(0,md.saved))} of ${$0(md.tgt)} target</span><span style="color:${sCol};font-weight:700">${md.saved>=md.tgt?'reached':Math.round(sPct)+'%'}</span></div>
         <div class="gauge" style="height:5px"><div class="gfill" style="width:${sPct.toFixed(1)}%;background:${sCol};height:5px"></div></div>
       </div>`:''}
@@ -710,6 +784,12 @@ function vForecast(C) {
           <input class="finp" type="number" inputmode="decimal" placeholder="${Math.round(C.avgExpHist)}" value="${S.set.fcExp}"
             onchange="S.set.fcExp=this.value;save();render()">
           <div class="ks" style="margin-top:4px">blank = auto from your history (${$0(C.avgExpHist)})</div>
+        </div>
+        <div>
+          <label class="flab">Safety buffer SB</label>
+          <input class="finp" type="number" inputmode="decimal" placeholder="${Math.round(C.fcExp*3)}" value="${S.set.sbOverride}"
+            onchange="S.set.sbOverride=this.value;save();render()">
+          <div class="ks" style="margin-top:4px">blank = auto: 3 × expenses (${$0(C.fcExp*3)})</div>
         </div>
       </div>
       <div id="fcres">${fcResults(C)}</div>
