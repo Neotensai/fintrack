@@ -18,7 +18,7 @@ function isoOf(d){ return d.toISOString().split('T')[0]; }
 function dnum(d){ return d.getFullYear()*10000 + d.getMonth()*100 + d.getDate(); }
 
 const DEFAULTS = {
-  set: { startBal: 30000, startDate: isoOf(TODAY), income: 4500, incomeByMonth: {},
+  set: { startBal: 30000, startDate: isoOf(TODAY), income: 4500, incomeByMonth: {}, expByMonth: {},
          saveTarget: 500, saveByMonth: {}, fcIncome: '', fcExp: '', sbOverride: '', budgets: {}, hideBal: false, lastBackup: '' },
   txs: [],
   recurring: [],
@@ -32,6 +32,8 @@ S.editId = null;
 S.forecastAmt = '';
 S.fcMode = 'cash';
 S.catScope = 'period';
+S.viewYear = YEAR;
+S.editYear = YEAR;
 S.subview = null;
 S.form = blankForm();
 
@@ -87,6 +89,10 @@ function incomeFor(y, m) {
 function saveFor(y, m) {
   const v = S.set.saveByMonth[`${y}-${m}`];
   return (v === undefined || v === null || v === '') ? S.set.saveTarget : +v;
+}
+function expOv(y, m) {
+  const v = S.set.expByMonth[`${y}-${m}`];
+  return (v === undefined || v === null || v === '') ? null : +v;
 }
 
 /* ---------- recurring engine ---------- */
@@ -218,7 +224,8 @@ function compute() {
   const mCredit = pTxs.filter(t=>t.type==='expense' && t.pm==='credit').reduce((s,t)=>s+t.amt,0);
   const mNet = mInc - mCash;
   const mCommitted = mCash + mCredit;
-  const remainingExp = Math.max(0, fcExp - mCommitted); // expected spend still to come before next payday
+  const curExpPlan = expOv(cur.y, cur.m) ?? fcExp;
+  const remainingExp = Math.max(0, curExpPlan - mCommitted); // expected spend still to come before next payday
 
   const totalDays = Math.max(1, Math.round((pEnd - pStart)/86400000));
   const elapsedDays = Math.max(0, Math.min(totalDays, Math.round((nowNoon - pStart)/86400000)));
@@ -241,13 +248,14 @@ function compute() {
   for (const t of pTxs) if (t.type === 'expense') catSpend[t.cat] = (catSpend[t.cat]||0) + t.amt;
 
   const ydata = [];
+  const VY = S.viewYear || YEAR;
   for (let m = 0; m < 12; m++) {
-    const start = adjustedPayday(YEAR, m);
-    const end = nextPaydayAfter(YEAR, m);
+    const start = adjustedPayday(VY, m);
+    const end = nextPaydayAfter(VY, m);
     let ce = 0, cc = 0, cp = 0, ei = 0;
     const mt = [];
     for (const t of txs) {
-      if (inPeriod(t.date, YEAR, m)) {
+      if (inPeriod(t.date, VY, m)) {
         mt.push(t);
         if (t.type === 'income') ei += t.amt;
         else if (t.pm === 'cash') ce += t.amt;
@@ -258,12 +266,12 @@ function compute() {
         if (dnum(cd) >= dnum(start) && dnum(cd) < dnum(end)) cc += t.amt;
       }
     }
-    const ti = incomeFor(YEAR, m) + ei;
+    const ti = incomeFor(VY, m) + ei;
     const net = ti - ce - cc;
     const endBal = balAt(new Date(end.getTime() - 86400000));
-    const tgt = saveFor(YEAR, m);
+    const tgt = saveFor(VY, m);
     const saved = ti - ce - cp;
-    const isCur = (m === cur.m && YEAR === cur.y);
+    const isCur = (m === cur.m && VY === cur.y);
     const isFut = dnum(start) > dnum(now);
     ydata.push({ m, start, end, mt, ti, ce, cc, cp, net, endBal, tgt, saved, isCur, isFut });
   }
@@ -279,7 +287,7 @@ function compute() {
       md.projNet = md.net;
       md.projEnd = md.isCur ? md.endBal - remainingExp : md.endBal;
     } else {
-      md.pSpend = Math.max(fcExp, md.ce + md.cp);     // avg spend, unless known txs exceed it
+      md.pSpend = Math.max(expOv(VY, md.m) ?? fcExp, md.ce + md.cp); // period plan (or avg), unless known txs exceed it
       md.projNet = md.ti - md.pSpend - md.cc;
       md.projEnd = (run !== null ? run : bal) + md.projNet;
     }
@@ -293,12 +301,15 @@ function compute() {
   const catYear = {};
   for (const md of ydata) for (const t of md.mt) if (t.type === 'expense') catYear[t.cat] = (catYear[t.cat]||0) + t.amt;
 
+  let minYear = new Date(S.set.startDate + 'T12:00:00').getFullYear();
+  for (const t of txs) { const ty = new Date(t.date + 'T12:00:00').getFullYear(); if (ty < minYear) minYear = ty; }
+
   // savings vs plan, year to date (periods since tracking began, current one projected)
   let ytdSaved = 0, ytdPlan = 0;
   for (const md of ydata) if (!md.isFut && !md.preStart) { ytdSaved += md.isCur ? projSave : md.saved; ytdPlan += md.tgt; }
 
   return { bal, cur, pStart, pEnd, pend, p90, ptot, pGroups, avgExpHist, avgInc12, fcIncome, fcExp, sb, sbManual, remainingExp,
-           catPrev, catYear, ytdSaved, ytdPlan,
+           catPrev, catYear, ytdSaved, ytdPlan, minYear,
            daysToNext, prog, a27, payNext, pTxs, mInc, mCash, mCredit, mNet, mCommitted,
            pace, periodPct, spendPct, totalDays, elapsedDays,
            sTarget, allowedSpend, projSave, savePct, saveStatus, catSpend, ydata };
@@ -343,7 +354,7 @@ function projBase(C) {
   for (let k = 1; k <= 11; k++) {
     const fd = new Date(TODAY.getFullYear(), TODAY.getMonth() + k, 1);
     const hit = pendByMonth[`${fd.getFullYear()}-${fd.getMonth()}`] || 0;
-    base.push(base[base.length-1] + incomeFor(fd.getFullYear(), fd.getMonth()) - C.fcExp - hit);
+    base.push(base[base.length-1] + incomeFor(fd.getFullYear(), fd.getMonth()) - (expOv(fd.getFullYear(), fd.getMonth()) ?? C.fcExp) - hit);
     labels.push(MS[fd.getMonth()]);
   }
   return { base, labels };
@@ -463,7 +474,11 @@ function vHome(C) {
       <div class="kpi sm">
         <div class="kl">Period net</div>
         <div class="kv" style="color:${C.mNet>=0?'var(--grn)':'var(--red)'}">${$0(C.mNet)}</div>
-        <div class="ks">+${$0(C.mInc)} &middot; cash −${$0(C.mCash)}</div>
+        <div class="row" style="margin-top:6px">
+          <span style="font-size:13px;font-weight:800;color:var(--grn);font-variant-numeric:tabular-nums">IN ${$0(C.mInc)}</span>
+          <span style="font-size:13px;font-weight:800;color:${C.mCash>0?'var(--red)':'var(--tx3)'};font-variant-numeric:tabular-nums">OUT ${$0(C.mCash)}</span>
+        </div>
+        <div class="gauge" style="margin-top:7px;height:5px"><div class="gfill" style="width:${C.mInc>0?Math.min(100,(C.mCash/C.mInc)*100).toFixed(1):0}%;background:var(--red);height:5px"></div></div>
         <div class="ks" style="color:var(--tx3)">${periodLabel}</div>
       </div>
       <div class="kpi sm">
@@ -529,7 +544,13 @@ function vYear(C) {
   return `
   <div class="pg">
     <div class="card">
-      <div class="ct" style="margin-bottom:3px">${YEAR} pay periods</div>
+      <div class="row" style="margin-bottom:3px">
+        <div class="ct">${S.viewYear} pay periods</div>
+        <div style="display:flex;gap:6px">
+          ${S.viewYear > C.minYear ? `<button class="tbn" style="flex:none;padding:4px 12px" onclick="S.viewYear--;render()">&lsaquo;</button>` : `<button class="tbn" style="flex:none;padding:4px 12px;opacity:.25">&lsaquo;</button>`}
+          ${S.viewYear < YEAR ? `<button class="tbn" style="flex:none;padding:4px 12px" onclick="S.viewYear++;render()">&rsaquo;</button>` : `<button class="tbn" style="flex:none;padding:4px 12px;opacity:.25">&rsaquo;</button>`}
+        </div>
+      </div>
       <div class="cs" style="margin-bottom:10px">Each cycle runs payday to payday. Labelled by the month its payday falls in.</div>
       ${svgYearChart(C)}
       <div class="lgnd">
@@ -802,7 +823,7 @@ function vSettings(C) {
   if (S.subview === 'budgets') return vBudgets(C);
   if (S.subview === 'goals') return vGoals(C);
   if (S.subview === 'recurring') return vRecurring();
-  if (S.subview === 'income') return vMonthEditor('Income by period', 'incomeByMonth', S.set.income, 'Lands on each payday. Empty periods use the default');
+  if (S.subview === 'income') return vIncomeExp(C);
   if (S.subview === 'savings') return vMonthEditor('Savings target by period', 'saveByMonth', S.set.saveTarget, 'How much you want left over each period. Empty periods use the default');
   return `
   <div class="pg">
@@ -813,7 +834,7 @@ function vSettings(C) {
         <input class="set-inp" type="number" inputmode="decimal" value="${S.set.income}" onchange="S.set.income=+this.value||0;save();render()">
       </div>
       <div class="set-row" onclick="S.subview='income';render()" style="cursor:pointer">
-        <div><div class="set-l">Income by period</div><div class="set-s">Set the actual amount for each period</div></div>
+        <div><div class="set-l">Income &amp; expenses by period</div><div class="set-s">Actual income and expected spend, per period</div></div>
         <span style="color:var(--tx3)">&rsaquo;</span></div>
       <div class="set-row">
         <div><div class="set-l">Default savings target</div><div class="set-s">How much you aim to keep each period</div></div>
@@ -870,13 +891,56 @@ function vSettings(C) {
   </div>`;
 }
 
-function vMonthEditor(title, mapKey, defaultVal, subtitle) {
-  const cy = YEAR;
+function vIncomeExp(C) {
+  const cy = S.editYear;
   return `
   <div class="pg">
     <button class="bk" onclick="S.subview=null;render()">&lsaquo; Settings</button>
     <div class="card">
-      <div class="ct" style="margin-bottom:4px">${title} — ${cy}</div>
+      <div class="row" style="margin-bottom:4px">
+        <div class="ct">Income &amp; expenses — ${cy}</div>
+        <div style="display:flex;gap:6px">
+          <button class="tbn" style="flex:none;padding:4px 12px" onclick="S.editYear--;render()">&lsaquo;</button>
+          <button class="tbn" style="flex:none;padding:4px 12px" onclick="S.editYear++;render()">&rsaquo;</button>
+        </div>
+      </div>
+      <div class="cs" style="margin-bottom:10px">Per period: actual income (blank = ${$0(S.set.income)}) and expected spend (blank = avg ${$0(Math.round(C.fcExp))}). Expected spend drives the Year projections and the forecast.</div>
+      <div class="row" style="padding:0 2px 6px;border-bottom:1px solid var(--bd)">
+        <span class="fmlt" style="margin:0">Period</span>
+        <span style="display:flex;gap:8px"><span class="fmlt" style="margin:0;width:88px;text-align:right">Income</span><span class="fmlt" style="margin:0;width:88px;text-align:right">Expenses</span></span>
+      </div>
+      ${ML.map((name, m) => {
+        const k = `${cy}-${m}`;
+        const vi = S.set.incomeByMonth[k], ve = S.set.expByMonth[k];
+        const cur = periodOf(TODAY);
+        const isCur = (m === cur.m && cy === cur.y);
+        const start = adjustedPayday(cy, m), end = nextPaydayAfter(cy, m);
+        return `<div class="set-row">
+          <div><div class="set-l">${name}${isCur?' <span class="pill pr" style="vertical-align:2px">NOW</span>':''}</div>
+          <div class="set-s">${sdD(start)} → ${sdD(end)}</div></div>
+          <span style="display:flex;gap:8px">
+          <input class="set-inp" style="width:88px" type="number" inputmode="decimal" placeholder="${S.set.income}" value="${vi??''}" onchange="setMonthVal('incomeByMonth','${k}', this.value)">
+          <input class="set-inp" style="width:88px" type="number" inputmode="decimal" placeholder="${Math.round(C.fcExp)}" value="${ve??''}" onchange="setMonthVal('expByMonth','${k}', this.value)">
+          </span>
+        </div>`;
+      }).join('')}
+    </div>
+  </div>`;
+}
+
+function vMonthEditor(title, mapKey, defaultVal, subtitle) {
+  const cy = S.editYear;
+  return `
+  <div class="pg">
+    <button class="bk" onclick="S.subview=null;render()">&lsaquo; Settings</button>
+    <div class="card">
+      <div class="row" style="margin-bottom:4px">
+        <div class="ct">${title} — ${cy}</div>
+        <div style="display:flex;gap:6px">
+          <button class="tbn" style="flex:none;padding:4px 12px" onclick="S.editYear--;render()">&lsaquo;</button>
+          <button class="tbn" style="flex:none;padding:4px 12px" onclick="S.editYear++;render()">&rsaquo;</button>
+        </div>
+      </div>
       <div class="cs" style="margin-bottom:14px">${subtitle} (${$0(defaultVal)}).</div>
       ${ML.map((name, m) => {
         const k = `${cy}-${m}`;
