@@ -13,6 +13,8 @@ const ML = ['January','February','March','April','May','June','July','August','S
 const CATS = ['Housing','Food','Utilities','Transport','Health','Entertainment','Shopping','Electronics','Travel','Tech','Subscriptions','Other'];
 const CC = {Housing:'#6366f1',Food:'#34d399',Utilities:'#fbbf24',Transport:'#3b82f6',Health:'#ec4899',Entertainment:'#a855f7',Shopping:'#f97316',Electronics:'#06b6d4',Travel:'#84cc16',Tech:'#14b8a6',Subscriptions:'#e879f9',Other:'#64748b'};
 const KEY = 'fintrack-v1';
+const WORK_HOURS_PER_DAY = 7.87;
+const WORK_DAYS_PER_PERIOD = 21;
 
 function isoOf(d){ return d.toISOString().split('T')[0]; }
 function dnum(d){ return d.getFullYear()*10000 + d.getMonth()*100 + d.getDate(); }
@@ -85,6 +87,9 @@ function inPeriod(dateStr, py, pm) {
 function incomeFor(y, m) {
   const v = S.set.incomeByMonth[`${y}-${m}`];
   return (v === undefined || v === null || v === '') ? S.set.income : +v;
+}
+function hourlyRateFor(y, m) {
+  return incomeFor(y, m) / (WORK_DAYS_PER_PERIOD * WORK_HOURS_PER_DAY);
 }
 function saveFor(y, m) {
   const v = S.set.saveByMonth[`${y}-${m}`];
@@ -715,9 +720,9 @@ function fcResults(C) {
   </div>` : ''}
   <div class="fmlt">Cash flow recovery model</div>
   ${(()=>{
-    const hr = +S.set.hourlyRate||0;
-    const hours = hr>0 ? Math.ceil(fc/hr) : null;
-    const days  = hours ? Math.ceil(hours/8) : null;
+    const hr = hourlyRateFor(C.cur.y, C.cur.m);
+    const hours = hr > 0 ? Math.ceil(fc / hr) : null;
+    const days  = hours ? Math.ceil(hours / WORK_HOURS_PER_DAY) : null;
     return `<div class="cg3" style="margin-bottom:${hours?'8':'13'}px">
       <div class="ccrd"><div class="ccl">Surplus / mo</div><div class="ccv" style="color:${surplus>=0?'var(--grn)':'var(--red)'}">${$0(surplus)}</div></div>
       <div class="ccrd"><div class="ccl">Recovery</div><div class="ccv" style="color:${recovMo?VS[v.status].c:'var(--red)'}">${recovMo?recovMo+' mo':'never'}</div></div>
@@ -725,7 +730,7 @@ function fcResults(C) {
     </div>
     ${hours?`<div class="cg3" style="margin-bottom:13px">
       <div class="ccrd" style="border-color:rgba(0,168,255,.35)"><div class="ccl">Hours of work</div><div class="ccv" style="color:#7fc4ff">${hours.toLocaleString('en-US')} h</div></div>
-      <div class="ccrd" style="border-color:rgba(0,168,255,.35)"><div class="ccl">Working days (8h)</div><div class="ccv" style="color:#7fc4ff">${days} d</div></div>
+      <div class="ccrd" style="border-color:rgba(0,168,255,.35)"><div class="ccl">Working days (7.87h)</div><div class="ccv" style="color:#7fc4ff">${days} d</div></div>
       <div class="ccrd"><div class="ccl">Rate</div><div class="ccv" style="color:var(--tx3)">${$0(hr)}/h</div></div>
     </div>`:''}`;
   })()}
@@ -744,7 +749,7 @@ function fcResults(C) {
     min projected bal = <b style="color:${VS[v.status].c}">${$0(v.minPost)}</b> (${minLabel}) vs SB<br>
     SB = ${C.sbManual ? 'manual override' : 'exp × 3 = ' + $0(C.fcExp) + ' × 3'} = <b>${$0(C.sb)}</b><br>
     Recovery = cost ÷ surplus = ${$0(fc)} ÷ ${$0(surplus)}${recovMo?` ≈ <b>${recovMo} mo</b>`:''}<br>
-    ${+S.set.hourlyRate>0?`Work cost = ${$0(fc)} ÷ ${$0(+S.set.hourlyRate)}/h = <b>${Math.ceil(fc/(+S.set.hourlyRate)).toLocaleString('en-US')} h</b> ≈ <b>${Math.ceil(fc/(+S.set.hourlyRate)/8)} working days</b>`:'Add an hourly rate in Settings to see the work-cost conversion'}
+    ${hourlyRateFor(C.cur.y,C.cur.m)>0?`Work cost = ${$0(fc)} ÷ ${$$(hourlyRateFor(C.cur.y,C.cur.m))}/h = <b>${Math.ceil(fc/hourlyRateFor(C.cur.y,C.cur.m)).toLocaleString('en-US')} h</b> ≈ <b>${Math.ceil(fc/hourlyRateFor(C.cur.y,C.cur.m)/WORK_HOURS_PER_DAY)} working days</b>`:'Add a positive income in Settings to see the work-cost conversion'}
   </div>
   <div class="row" style="gap:8px;margin-top:13px">
     <input class="finp" id="wl-name" placeholder="Name this purchase..." style="flex:1">
@@ -845,11 +850,8 @@ function vSettings(C) {
         <input class="set-inp" type="number" inputmode="decimal" value="${S.set.income}" onchange="S.set.income=+this.value||0;save();render()">
       </div>
       <div class="set-row">
-        <div><div class="set-l">Hourly rate</div><div class="set-s">Converts purchase costs into hours and days of work in the Forecast. Blank = disabled.</div></div>
-        <div style="display:flex;align-items:center;gap:4px;flex-shrink:0">
-          <span style="font-size:12px;color:var(--tx3)">€/h</span>
-          <input class="set-inp" style="width:84px" type="number" inputmode="decimal" min="0" placeholder="0" value="${S.set.hourlyRate}" onchange="S.set.hourlyRate=this.value;save();render()">
-        </div>
+        <div><div class="set-l">Hourly rate</div><div class="set-s">Calculated automatically from the current period's net income: income ÷ 21 days ÷ 7.87 hours.</div></div>
+        <div style="font-size:14px;font-weight:800;color:var(--tx2);font-variant-numeric:tabular-nums;flex-shrink:0">${$$(hourlyRateFor(C.cur.y,C.cur.m))}/h</div>
       </div>
       <div class="set-row" onclick="S.subview='income';render()" style="cursor:pointer">
         <div><div class="set-l">Income &amp; expenses by period</div><div class="set-s">Actual income and expected spend, per period</div></div>
@@ -922,7 +924,7 @@ function vIncomeExp(C) {
           <button class="tbn" style="flex:none;padding:4px 12px" onclick="S.editYear++;render()">&rsaquo;</button>
         </div>
       </div>
-      <div class="cs" style="margin-bottom:10px">Per period: actual income (blank = ${$0(S.set.income)}) and expected spend (blank = avg ${$0(Math.round(C.fcExp))}). Expected spend drives the Year projections and the forecast.</div>
+      <div class="cs" style="margin-bottom:10px">Per period: actual net income (blank = ${$0(S.set.income)}) and expected spend (blank = avg ${$0(Math.round(C.fcExp))}). The hourly rate is recalculated automatically for each period as income ÷ 21 ÷ 7.87. Expected spend drives the Year projections and the forecast.</div>
       <div class="row" style="padding:0 2px 6px;border-bottom:1px solid var(--bd)">
         <span class="fmlt" style="margin:0">Period</span>
         <span style="display:flex;gap:8px"><span class="fmlt" style="margin:0;width:88px;text-align:right">Income</span><span class="fmlt" style="margin:0;width:88px;text-align:right">Expenses</span></span>
