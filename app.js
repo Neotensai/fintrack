@@ -21,7 +21,7 @@ function dnum(d){ return d.getFullYear()*10000 + d.getMonth()*100 + d.getDate();
 
 const DEFAULTS = {
   set: { startBal: 30000, startDate: isoOf(TODAY), income: 4500, incomeByMonth: {}, expByMonth: {},
-         saveTarget: 500, saveByMonth: {}, fcIncome: '', fcExp: '', sbOverride: '', hourlyRate: '', budgets: {}, hideBal: false, lastBackup: '' },
+         saveTarget: 500, saveByMonth: {}, fcIncome: '', fcExp: '', sbOverride: '', standardIncome: null, budgets: {}, hideBal: false, lastBackup: '' },
   txs: [],
   recurring: [],
   goals: [],
@@ -29,6 +29,12 @@ const DEFAULTS = {
 };
 
 let S = load();
+// One-time migration: use the existing default income as the initial standard income.
+// From this point onward the two values are independent.
+if (S.set.standardIncome === null || S.set.standardIncome === undefined || S.set.standardIncome === '') {
+  S.set.standardIncome = +S.set.income || 0;
+  save();
+}
 S.tab = 'home';
 S.editId = null;
 S.forecastAmt = '';
@@ -88,8 +94,9 @@ function incomeFor(y, m) {
   const v = S.set.incomeByMonth[`${y}-${m}`];
   return (v === undefined || v === null || v === '') ? S.set.income : +v;
 }
-function hourlyRateFor(y, m) {
-  return incomeFor(y, m) / (WORK_DAYS_PER_PERIOD * WORK_HOURS_PER_DAY);
+function hourlyRate() {
+  const income = +S.set.standardIncome || 0;
+  return income / (WORK_DAYS_PER_PERIOD * WORK_HOURS_PER_DAY);
 }
 function saveFor(y, m) {
   const v = S.set.saveByMonth[`${y}-${m}`];
@@ -720,7 +727,7 @@ function fcResults(C) {
   </div>` : ''}
   <div class="fmlt">Cash flow recovery model</div>
   ${(()=>{
-    const hr = hourlyRateFor(C.cur.y, C.cur.m);
+    const hr = hourlyRate();
     const hours = hr > 0 ? Math.ceil(fc / hr) : null;
     const days  = hours ? Math.ceil(hours / WORK_HOURS_PER_DAY) : null;
     return `<div class="cg3" style="margin-bottom:${hours?'8':'13'}px">
@@ -749,7 +756,7 @@ function fcResults(C) {
     min projected bal = <b style="color:${VS[v.status].c}">${$0(v.minPost)}</b> (${minLabel}) vs SB<br>
     SB = ${C.sbManual ? 'manual override' : 'exp × 3 = ' + $0(C.fcExp) + ' × 3'} = <b>${$0(C.sb)}</b><br>
     Recovery = cost ÷ surplus = ${$0(fc)} ÷ ${$0(surplus)}${recovMo?` ≈ <b>${recovMo} mo</b>`:''}<br>
-    ${hourlyRateFor(C.cur.y,C.cur.m)>0?`Work cost = ${$0(fc)} ÷ ${$$(hourlyRateFor(C.cur.y,C.cur.m))}/h = <b>${Math.ceil(fc/hourlyRateFor(C.cur.y,C.cur.m)).toLocaleString('en-US')} h</b> ≈ <b>${Math.ceil(fc/hourlyRateFor(C.cur.y,C.cur.m)/WORK_HOURS_PER_DAY)} working days</b>`:'Add a positive income in Settings to see the work-cost conversion'}
+    ${hourlyRate()>0?`Work cost = ${$0(fc)} ÷ ${$$(hourlyRate())}/h = <b>${Math.ceil(fc/hourlyRate()).toLocaleString('en-US')} h</b> ≈ <b>${Math.ceil(fc/hourlyRate()/WORK_HOURS_PER_DAY)} working days</b>`:'Add a positive standard monthly income in Settings to see the work-cost conversion'}
   </div>
   <div class="row" style="gap:8px;margin-top:13px">
     <input class="finp" id="wl-name" placeholder="Name this purchase..." style="flex:1">
@@ -850,8 +857,12 @@ function vSettings(C) {
         <input class="set-inp" type="number" inputmode="decimal" value="${S.set.income}" onchange="S.set.income=+this.value||0;save();render()">
       </div>
       <div class="set-row">
-        <div><div class="set-l">Hourly rate</div><div class="set-s">Calculated automatically from the current period's net income: income ÷ 21 days ÷ 7.87 hours.</div></div>
-        <div style="font-size:14px;font-weight:800;color:var(--tx2);font-variant-numeric:tabular-nums;flex-shrink:0">${$$(hourlyRateFor(C.cur.y,C.cur.m))}/h</div>
+        <div><div class="set-l">Standard monthly income</div><div class="set-s">Ordinary net income used only for the hourly-rate calculation. Exclude 13th/14th salary, bonuses and reimbursements.</div></div>
+        <input class="set-inp" type="number" inputmode="decimal" min="0" value="${S.set.standardIncome}" onchange="S.set.standardIncome=Math.max(0,+this.value||0);save();render()">
+      </div>
+      <div class="set-row">
+        <div><div class="set-l">Hourly rate</div><div class="set-s">Calculated as standard monthly income ÷ 21 days ÷ 7.87 hours. Actual income by period does not change it.</div></div>
+        <div style="font-size:14px;font-weight:800;color:var(--tx2);font-variant-numeric:tabular-nums;flex-shrink:0">${$$(hourlyRate())}/h</div>
       </div>
       <div class="set-row" onclick="S.subview='income';render()" style="cursor:pointer">
         <div><div class="set-l">Income &amp; expenses by period</div><div class="set-s">Actual income and expected spend, per period</div></div>
@@ -924,7 +935,7 @@ function vIncomeExp(C) {
           <button class="tbn" style="flex:none;padding:4px 12px" onclick="S.editYear++;render()">&rsaquo;</button>
         </div>
       </div>
-      <div class="cs" style="margin-bottom:10px">Per period: actual net income (blank = ${$0(S.set.income)}) and expected spend (blank = avg ${$0(Math.round(C.fcExp))}). The hourly rate is recalculated automatically for each period as income ÷ 21 ÷ 7.87. Expected spend drives the Year projections and the forecast.</div>
+      <div class="cs" style="margin-bottom:10px">Per period: actual net income (blank = ${$0(S.set.income)}) and expected spend (blank = avg ${$0(Math.round(C.fcExp))}). 13th/14th salary and other extras belong here; they affect cash flow but not the hourly rate. Expected spend drives the Year projections and the forecast.</div>
       <div class="row" style="padding:0 2px 6px;border-bottom:1px solid var(--bd)">
         <span class="fmlt" style="margin:0">Period</span>
         <span style="display:flex;gap:8px"><span class="fmlt" style="margin:0;width:88px;text-align:right">Income</span><span class="fmlt" style="margin:0;width:88px;text-align:right">Expenses</span></span>
@@ -1144,6 +1155,9 @@ function importJSON(inp){
       const p = JSON.parse(r.result);
       if (!p.set || !Array.isArray(p.txs)) throw 0;
       S.set = { ...DEFAULTS.set, ...p.set };
+      if (S.set.standardIncome === null || S.set.standardIncome === undefined || S.set.standardIncome === '') {
+        S.set.standardIncome = +S.set.income || 0;
+      }
       S.txs = p.txs; S.recurring = p.recurring||[]; S.goals = p.goals||[]; S.wishlist = p.wishlist||[];
       save(); render(); toast('Backup restored');
     } catch(e){ toast('Invalid backup file'); }
@@ -1154,7 +1168,11 @@ function importJSON(inp){
 function resetAll(){
   if (!confirm('Delete all data and start fresh?')) return;
   localStorage.removeItem(KEY);
-  S = load(); S.tab='home'; S.form=blankForm(); S.forecastAmt=''; S.subview=null;
+  S = load();
+  if (S.set.standardIncome === null || S.set.standardIncome === undefined || S.set.standardIncome === '') {
+    S.set.standardIncome = +S.set.income || 0;
+  }
+  S.tab='home'; S.form=blankForm(); S.forecastAmt=''; S.subview=null;
   render(); toast('All data cleared');
 }
 
