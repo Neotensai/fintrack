@@ -19,7 +19,7 @@ function dnum(d){ return d.getFullYear()*10000 + d.getMonth()*100 + d.getDate();
 
 const DEFAULTS = {
   set: { startBal: 30000, startDate: isoOf(TODAY), income: 4500, incomeByMonth: {}, expByMonth: {},
-         saveTarget: 500, saveByMonth: {}, fcIncome: '', fcExp: '', sbOverride: '', budgets: {}, hideBal: false, lastBackup: '' },
+         saveTarget: 500, saveByMonth: {}, fcIncome: '', fcExp: '', sbOverride: '', hourlyRate: '', budgets: {}, hideBal: false, lastBackup: '' },
   txs: [],
   recurring: [],
   goals: [],
@@ -714,11 +714,21 @@ function fcResults(C) {
     <div class="ccrd"><div class="ccl">Lowest point</div><div class="ccv" style="color:${VS[v.status].c}">${$0(v.minPost)}</div></div>
   </div>` : ''}
   <div class="fmlt">Cash flow recovery model</div>
-  <div class="cg3" style="margin-bottom:13px">
-    <div class="ccrd"><div class="ccl">Surplus / mo</div><div class="ccv" style="color:${surplus>=0?'var(--grn)':'var(--red)'}">${$0(surplus)}</div></div>
-    <div class="ccrd"><div class="ccl">Recovery</div><div class="ccv" style="color:${recovMo?VS[v.status].c:'var(--red)'}">${recovMo?recovMo+' mo':'never'}</div></div>
-    <div class="ccrd"><div class="ccl">Recovered by</div><div class="ccv" style="font-size:11.5px;color:var(--tx2)">${recovDate?recovDate.toLocaleDateString('en-US',{month:'short',year:'numeric'}):'—'}</div></div>
-  </div>
+  ${(()=>{
+    const hr = +S.set.hourlyRate||0;
+    const hours = hr>0 ? Math.ceil(fc/hr) : null;
+    const days  = hours ? Math.ceil(hours/8) : null;
+    return `<div class="cg3" style="margin-bottom:${hours?'8':'13'}px">
+      <div class="ccrd"><div class="ccl">Surplus / mo</div><div class="ccv" style="color:${surplus>=0?'var(--grn)':'var(--red)'}">${$0(surplus)}</div></div>
+      <div class="ccrd"><div class="ccl">Recovery</div><div class="ccv" style="color:${recovMo?VS[v.status].c:'var(--red)'}">${recovMo?recovMo+' mo':'never'}</div></div>
+      <div class="ccrd"><div class="ccl">Recovered by</div><div class="ccv" style="font-size:11.5px;color:var(--tx2)">${recovDate?recovDate.toLocaleDateString('en-US',{month:'short',year:'numeric'}):'—'}</div></div>
+    </div>
+    ${hours?`<div class="cg3" style="margin-bottom:13px">
+      <div class="ccrd" style="border-color:rgba(0,168,255,.35)"><div class="ccl">Hours of work</div><div class="ccv" style="color:#7fc4ff">${hours.toLocaleString('en-US')} h</div></div>
+      <div class="ccrd" style="border-color:rgba(0,168,255,.35)"><div class="ccl">Working days (8h)</div><div class="ccv" style="color:#7fc4ff">${days} d</div></div>
+      <div class="ccrd"><div class="ccl">Rate</div><div class="ccv" style="color:var(--tx3)">${$0(hr)}/h</div></div>
+    </div>`:''}`;
+  })()}
   <div class="cn" style="background:rgba(0,168,255,.06);border-color:rgba(0,168,255,.3)">
     <b>50/30/20 check:</b> with ${$0(C.fcIncome)} income, your guideline discretionary (wants) budget is ${$0(disc)}/mo.
     This purchase equals <b>${discMonths.toFixed(1)} month${discMonths>=1.95?'s':''}</b> of that allowance${discMonths>3?' — consider spreading or delaying it':''}.
@@ -733,7 +743,8 @@ function fcResults(C) {
     <div class="fmlt">Formula breakdown</div>
     min projected bal = <b style="color:${VS[v.status].c}">${$0(v.minPost)}</b> (${minLabel}) vs SB<br>
     SB = ${C.sbManual ? 'manual override' : 'exp × 3 = ' + $0(C.fcExp) + ' × 3'} = <b>${$0(C.sb)}</b><br>
-    Recovery = cost ÷ surplus = ${$0(fc)} ÷ ${$0(surplus)}${recovMo?` ≈ <b>${recovMo} mo</b>`:''}
+    Recovery = cost ÷ surplus = ${$0(fc)} ÷ ${$0(surplus)}${recovMo?` ≈ <b>${recovMo} mo</b>`:''}<br>
+    ${+S.set.hourlyRate>0?`Work cost = ${$0(fc)} ÷ ${$0(+S.set.hourlyRate)}/h = <b>${Math.ceil(fc/(+S.set.hourlyRate)).toLocaleString('en-US')} h</b> ≈ <b>${Math.ceil(fc/(+S.set.hourlyRate)/8)} working days</b>`:'Add an hourly rate in Settings to see the work-cost conversion'}
   </div>
   <div class="row" style="gap:8px;margin-top:13px">
     <input class="finp" id="wl-name" placeholder="Name this purchase..." style="flex:1">
@@ -832,6 +843,13 @@ function vSettings(C) {
       <div class="set-row">
         <div><div class="set-l">Default income</div><div class="set-s">Lands on each payday (27th, shifted off weekends)</div></div>
         <input class="set-inp" type="number" inputmode="decimal" value="${S.set.income}" onchange="S.set.income=+this.value||0;save();render()">
+      </div>
+      <div class="set-row">
+        <div><div class="set-l">Hourly rate</div><div class="set-s">Converts purchase costs into hours and days of work in the Forecast. Blank = disabled.</div></div>
+        <div style="display:flex;align-items:center;gap:4px;flex-shrink:0">
+          <span style="font-size:12px;color:var(--tx3)">€/h</span>
+          <input class="set-inp" style="width:84px" type="number" inputmode="decimal" min="0" placeholder="0" value="${S.set.hourlyRate}" onchange="S.set.hourlyRate=this.value;save();render()">
+        </div>
       </div>
       <div class="set-row" onclick="S.subview='income';render()" style="cursor:pointer">
         <div><div class="set-l">Income &amp; expenses by period</div><div class="set-s">Actual income and expected spend, per period</div></div>
